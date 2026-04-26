@@ -82,6 +82,7 @@ class BatchDownloadInput:
     keep_raw: bool = False
     name_override: str | None = None  # Sprint 2: --name flag for single URL
     force: bool = False  # Sprint 4.5: bypass skip-existing
+    target_dir: Path | None = None  # Sprint 5: where files land (defaults to output_dir)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,12 +135,33 @@ class BatchDownloadUseCase:
                 f"output directory {inp.output_dir} is a symlink; refusing to write through it"
             )
 
+        # F2 (Sprint 5 review): target_dir MUST be under output_dir.
+        # Without this guard, every per-track _build_manifest_entry would
+        # raise ManifestInconsistent on relative_to() failure -- expensive,
+        # late, and after raw downloads already landed in .tmp/.
+        if inp.target_dir is not None:
+            if inp.target_dir.is_symlink():
+                raise NameOutsideOutputDir(
+                    f"target_dir {inp.target_dir} is a symlink; refusing to write through it"
+                )
+            try:
+                inp.target_dir.resolve().relative_to(inp.output_dir.resolve())
+            except ValueError as e:
+                raise NameOutsideOutputDir(
+                    f"target_dir {inp.target_dir} is not under output_dir {inp.output_dir}"
+                ) from e
+
         # Sprint 2: --name only valid with exactly one URL.
         if inp.name_override is not None and len(inp.urls) != 1:
             raise NameAmbiguous(f"--name requires exactly one URL, got {len(inp.urls)}")
 
+        # Sprint 5: target_dir is where files actually land (e.g. a playlist
+        # subdir); output_dir stays the top-level for manifest path computation
+        # and .tmp / .shokz state.
+        target_dir = inp.target_dir or inp.output_dir
         tmp_dir = inp.output_dir / ".tmp"
         inp.output_dir.mkdir(parents=True, exist_ok=True)
+        target_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
         # Sprint 4.5 review fix #4: launch reconciliation AFTER guards pass.
@@ -148,7 +170,7 @@ class BatchDownloadUseCase:
         self._reconcile_task = asyncio.create_task(self._reconcile_warn())
 
         # Build the per-run resolver from the configured output_dir.
-        resolver = self._resolver_factory(inp.output_dir)
+        resolver = self._resolver_factory(target_dir)
 
         sem = asyncio.Semaphore(inp.concurrency)
         started = time.monotonic()
@@ -158,6 +180,7 @@ class BatchDownloadUseCase:
                 return await self._process_one(
                     url,
                     inp.output_dir,
+                    target_dir,
                     tmp_dir,
                     inp.spec,
                     inp.keep_raw,
@@ -173,6 +196,7 @@ class BatchDownloadUseCase:
         self,
         url: str,
         output_dir: Path,
+        target_dir: Path,
         tmp_dir: Path,
         spec: AudioSpec,
         keep_raw: bool,

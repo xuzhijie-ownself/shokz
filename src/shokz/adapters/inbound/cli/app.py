@@ -11,6 +11,7 @@ from shokz import __version__
 from shokz.adapters.inbound.cli.commands.config_cmd import config_app
 from shokz.adapters.inbound.cli.commands.download import download_command
 from shokz.adapters.inbound.cli.commands.library_cmd import library_app
+from shokz.adapters.inbound.cli.commands.playlist import playlist_command
 
 app = typer.Typer(
     name="shokz",
@@ -20,6 +21,7 @@ app = typer.Typer(
 )
 
 app.command("download")(download_command)
+app.command("playlist")(playlist_command)
 app.add_typer(config_app, name="config")
 app.add_typer(library_app, name="library")
 

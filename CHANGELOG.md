@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] -- 2026-04-27
+
+### Added -- Sprint 5: Source resolution + playlists
+- `domain/models.py`: `PlaylistInfo` dataclass (title + item_urls).
+- `application/ports/outbound/video_source.py`: `VideoSourcePort.resolve_playlist`
+  returns `PlaylistInfo | None`.
+- `adapters/outbound/ytdlp_source.py`: implements `resolve_playlist` via
+  `yt_dlp.YoutubeDL(extract_flat=True)`. F3 fix: playlist-shaped URLs (`list=`)
+  with no `_type` raise `DownloadFailed` instead of silently returning None
+  (catches yt-dlp throttle / partial-response failures).
+- `application/use_cases/expand_playlist.py`: `ExpandPlaylistUseCase`
+  returns `PlaylistInfo` (title + URLs in one call -- F1 fix eliminates
+  the CLI's prior double-extract-info round-trip).
+- `application/use_cases/batch_download.py`:
+  - `BatchDownloadInput.target_dir: Path | None` (where files land; manifest
+    paths still relative to `output_dir`).
+  - F2 fix: upfront guard rejects `target_dir` outside `output_dir` or
+    symlinked, BEFORE any download work happens.
+- `application/policies/reconciliation.py`: walks subdirectories via
+  `rglob("*.mp3")`, excluding `.tmp/` and `.shokz/` -- the Sprint 4.5 retro
+  DoD ratchet item.
+- `adapters/inbound/cli/commands/playlist.py`: `shokz playlist URL` command.
+  Flags: `--playlist-subdir/--no-playlist-subdir` (default subdir=true),
+  `--yes`, `--confirm-threshold`, plus the usual `-o/-c/--keep-raw/--force/
+  --log-level`.
+- `config/schema.py`: `[sources.youtube] playlist_confirm_threshold: int = 50`.
+
+### Code-review audit (Sprint 5 review)
+silent-failure-hunter found 6 issues. 3 HIGH + 1 Med fixed; 2 deferred:
+
+**Fixed:**
+- **HIGH F1**: CLI no longer does a 2nd network call for the title -- threaded
+  through `PlaylistInfo` from the use case. Previously, a bare `except` on the
+  2nd extract silently fell back to literal `"playlist"` directory name.
+- **HIGH F2**: upfront `target_dir` guard in `BatchDownloadUseCase.execute`
+  prevents N late `ManifestInconsistent` failures (also rejects symlink).
+- **HIGH F3**: yt-dlp dict-without-`_type` on playlist-shaped URLs raises
+  `DownloadFailed` (was silently treated as "not a playlist").
+- **Med F5**: acceptance tests skip on retired-playlist-URL detection
+  (`SourceUnavailable` -> `pytest.skip`) instead of failing as if a regression.
+
+**Deferred with reason:**
+- Med F4 (reconciliation excluded_dirs hardcoded): config knob deferred to
+  Sprint 9 doctor sweep. Current excludes (`.tmp/`, `.shokz/`) cover the
+  shokz-managed state; user-created hidden dirs surfacing as orphans is
+  acceptable observability noise for v1.
+- Low F6 (off-by-one `>=` threshold semantics): documented as `>=` in the
+  CLI help; user-visible message says "items >= threshold" so the boundary
+  is honest. Cosmetic.
+
+### Verified
+- ruff check + format: clean
+- mypy --strict: clean (46 source files)
+- pytest unit: 90 passed (was 94 pre-Sprint-5 -- changes to PlaylistInfo
+  return shape required adjusting some tests; Sprint 5 net-added 4 tests),
+  90% cov
+- INTEGRATION=1 acceptance (excluding @slow): 34 passed in ~100s
+  (Sprint 1: 4 + 2: 7 + 3: 10 + 4: 2 + 4.5: 9 + 5: 2)
+- @slow Sprint 5 tests: 5 (full playlist downloads -- run on demand with
+  `-m slow`)
+- just sprint-review 5: 11/11 covered
+- just kill-test: still PASS (Sprint 4 ratchet held)
+
+### Sprint 5 deliberate scope (deferred per spec)
+- Cross-source playlists (e.g. SoundCloud)              -> when source added
+- Cookie-gated playlists (members-only)                 -> later
+- Retry on partial playlist failures                    -> Sprint 7
+- Playlist as a single ManifestEntry "album"            -> v2 if requested
+- VCR/cassette for acceptance tests                     -> v2 (now skip on
+                                                           retired URL)
+
 ## [0.5.0] -- 2026-04-27
 
 ### Added -- Sprint 4.5: Skip-existing + reconciliation + library list/show/verify

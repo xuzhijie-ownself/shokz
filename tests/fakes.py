@@ -47,6 +47,18 @@ class FakeVideoSource:
     def can_handle(self, url: str) -> bool:
         return "youtube.com" in url or "youtu.be" in url or url.startswith("fake://")
 
+    # Sprint 5: control playlist expansion. Default None = single video.
+    # Set playlist_items to mock a playlist; title defaults to 'fake'.
+    playlist_items: tuple[str, ...] | None = None
+    playlist_title: str = "fake-playlist"
+
+    async def resolve_playlist(self, url: str):  # type: ignore[no-untyped-def]
+        from shokz.domain.models import PlaylistInfo
+
+        if self.playlist_items is None:
+            return None
+        return PlaylistInfo(title=self.playlist_title, item_urls=self.playlist_items)
+
     async def resolve(self, url: str) -> Track:
         self.resolve_calls.append(url)
         if url in self.fail_resolve_for:

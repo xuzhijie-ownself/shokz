@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from shokz.domain.models import RawDownload, Track
+from shokz.domain.models import PlaylistInfo, RawDownload, Track
 
 
 @runtime_checkable
@@ -19,6 +19,15 @@ class VideoSourcePort(Protocol):
 
     async def resolve(self, url: str) -> Track:
         """Fetch metadata only — no bytes downloaded."""
+
+    async def resolve_playlist(self, url: str) -> PlaylistInfo | None:
+        """If url is a playlist: return PlaylistInfo (title + per-item URLs).
+
+        Returns None if the URL is NOT a playlist (caller should treat as
+        single-video). Sprint 5 review F3: if the URL is playlist-shaped but
+        yt-dlp returns no playlist marker, raise DownloadFailed instead of
+        silently returning None.
+        """
 
     async def download_audio(
         self,

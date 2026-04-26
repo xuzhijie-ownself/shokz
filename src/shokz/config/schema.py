@@ -46,6 +46,7 @@ class YouTubeConfig(BaseModel):
 
     ejs_source: str = "ejs:github"
     sleep_requests: float = Field(default=1.0, ge=0.0, le=60.0)
+    playlist_confirm_threshold: int = Field(default=50, ge=1, le=10000)
 
 
 class SourcesConfig(BaseModel):

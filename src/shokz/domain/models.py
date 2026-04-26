@@ -100,3 +100,16 @@ class FailureEntry:
     error_class: str
     error_message: str
     failed_at: str  # ISO-8601 UTC
+
+
+@dataclass(frozen=True, slots=True)
+class PlaylistInfo:
+    """Sprint 5: playlist resolution result -- title + per-item URLs.
+
+    F1 (Sprint 5 review fix): keeping the title alongside the URLs eliminates
+    the CLI's double-extract-info call (which had a bare except + silent
+    fallback to literal "playlist" dirname).
+    """
+
+    title: str
+    item_urls: tuple[str, ...]

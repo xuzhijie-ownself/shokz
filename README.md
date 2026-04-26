@@ -36,6 +36,23 @@ shokz download --output ~/swim-mp3s URL              # custom output dir
 If two videos resolve to the same filename, the second auto-suffixes:
 `Foo.mp3` → `Foo (2).mp3` → `Foo (3).mp3` ...
 
+### Playlists (v0.6.0+)
+
+```bash
+shokz playlist <playlist URL>                  # default: tracks under downloads/<playlist title>/
+shokz playlist --no-playlist-subdir <URL>      # tracks land flat in downloads/
+shokz playlist --yes <URL>                     # bypass the >=50-item confirmation
+shokz playlist --confirm-threshold 100 <URL>   # raise the confirmation threshold
+```
+
+Playlists with >= the configured threshold (default 50, configurable via
+`sources.youtube.playlist_confirm_threshold` or `--confirm-threshold`)
+require explicit confirmation via `--yes` to avoid surprise overnight
+runs of 200-track playlists.
+
+`shokz library verify` walks subdirectories so per-playlist subfolders are
+correctly reconciled (does NOT false-positive each playlist track).
+
 ### Skip-existing + library inspection (v0.5.0+)
 
 Re-running `shokz download` on already-completed URLs is near-instant — the

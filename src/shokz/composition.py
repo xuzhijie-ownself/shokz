@@ -18,6 +18,7 @@ from shokz.application.policies.filename_resolver import FilenameResolver
 from shokz.application.policies.reconciliation import ReconciliationPolicy
 from shokz.application.policies.skip_existing import SkipExistingPolicy
 from shokz.application.use_cases.batch_download import BatchDownloadUseCase
+from shokz.application.use_cases.expand_playlist import ExpandPlaylistUseCase
 from shokz.application.use_cases.library_query import (
     ListLibraryUseCase,
     ShowLibraryUseCase,
@@ -31,6 +32,7 @@ class Container:
     """Resolved use cases ready to be invoked by inbound adapters."""
 
     batch_download: BatchDownloadUseCase
+    expand_playlist: ExpandPlaylistUseCase
     list_library: ListLibraryUseCase
     show_library: ShowLibraryUseCase
     verify_library: VerifyLibraryUseCase
@@ -76,8 +78,10 @@ def build_container(config: AppConfig) -> Container:
     list_library = ListLibraryUseCase(manifest=manifest)
     show_library = ShowLibraryUseCase(manifest=manifest)
     verify_library = VerifyLibraryUseCase(reconciliation=reconciliation)
+    expand_playlist = ExpandPlaylistUseCase(sources=sources)
     return Container(
         batch_download=batch_download,
+        expand_playlist=expand_playlist,
         list_library=list_library,
         show_library=show_library,
         verify_library=verify_library,

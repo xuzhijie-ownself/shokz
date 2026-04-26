@@ -47,12 +47,20 @@ class ReconciliationPolicy:
         # Set of mp3_path values claimed by the manifest, normalized to absolute paths.
         manifest_paths: set[Path] = {self.output_dir / e.mp3_path for e in entries}
 
-        # Disk state: top-level *.mp3 in output_dir (NOT recursive into .tmp/ or .shokz/).
+        # Sprint 5 (Sprint 4.5 retro DoD ratchet): walk subdirectories so
+        # playlist-subdir files are NOT false-positive orphans. Exclude
+        # state directories (.tmp/, .shokz/) -- they are not user content.
         disk_mp3s: set[Path] = set()
+        excluded_parts = {".tmp", ".shokz"}
         if self.output_dir.exists():
-            for child in self.output_dir.iterdir():
-                if child.is_file() and child.suffix == ".mp3":
-                    disk_mp3s.add(child)
+            for path in self.output_dir.rglob("*.mp3"):
+                if not path.is_file():
+                    continue
+                # Reject any path where ANY component is excluded.
+                rel_parts = path.relative_to(self.output_dir).parts
+                if any(part in excluded_parts for part in rel_parts):
+                    continue
+                disk_mp3s.add(path)
 
         ok: list[tuple[ManifestEntry, Path]] = []
         orphan_entries: list[ManifestEntry] = []

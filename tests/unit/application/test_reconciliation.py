@@ -69,3 +69,60 @@ async def test_reconciliation_clean_state_is_clean(tmp_path: Path) -> None:
     report = await policy.scan()
     assert report.is_clean
     assert len(report.ok) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_walks_subdirectories(tmp_path: Path) -> None:
+    """Sprint 5 AC: 'Reconciliation walks subdirectories (Sprint 4.5 retro DoD ratchet)'.
+
+    Manifest entry references "My Playlist/Track A.mp3"; the file exists at
+    that subdir path; reconciliation must NOT flag it as orphan.
+    """
+    manifest = FakeManifest(successes=[_entry("trackA", "My Playlist/Track A.mp3")])
+    (tmp_path / "My Playlist").mkdir()
+    (tmp_path / "My Playlist" / "Track A.mp3").write_bytes(b"a")
+
+    fs = FakeFileSystem()
+    policy = ReconciliationPolicy(manifest=manifest, filesystem=fs, output_dir=tmp_path)
+    report = await policy.scan()
+
+    assert report.is_clean
+    assert len(report.ok) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_reports_orphan_in_subdirectory(tmp_path: Path) -> None:
+    """Sprint 5 AC: 'Reconciliation reports orphan in subdirectory'."""
+    manifest = FakeManifest(successes=[])  # empty manifest
+    (tmp_path / "My Playlist").mkdir()
+    (tmp_path / "My Playlist" / "Mystery.mp3").write_bytes(b"x")
+
+    fs = FakeFileSystem()
+    policy = ReconciliationPolicy(manifest=manifest, filesystem=fs, output_dir=tmp_path)
+    report = await policy.scan()
+
+    assert not report.is_clean
+    orphan_names = {p.name for p in report.orphan_files}
+    assert "Mystery.mp3" in orphan_names
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_excludes_tmp_and_shokz_from_scan(tmp_path: Path) -> None:
+    """Sprint 5 AC: 'Reconciliation excludes .tmp/ and .shokz/ from scan'."""
+    manifest = FakeManifest(successes=[])
+    # Materialize state-dir noise that should NOT count as orphan files.
+    (tmp_path / ".tmp").mkdir()
+    (tmp_path / ".tmp" / "leftover.mp3").write_bytes(b"x")  # .mp3 in .tmp
+    (tmp_path / ".shokz").mkdir()
+    (tmp_path / ".shokz" / "ignored.mp3").write_bytes(b"x")  # not a real shokz file
+    # Plus a real top-level mp3 that IS an orphan (control)
+    (tmp_path / "Real.mp3").write_bytes(b"y")
+
+    fs = FakeFileSystem()
+    policy = ReconciliationPolicy(manifest=manifest, filesystem=fs, output_dir=tmp_path)
+    report = await policy.scan()
+
+    orphan_names = {p.name for p in report.orphan_files}
+    assert "Real.mp3" in orphan_names
+    assert "leftover.mp3" not in orphan_names  # excluded (under .tmp/)
+    assert "ignored.mp3" not in orphan_names  # excluded (under .shokz/)

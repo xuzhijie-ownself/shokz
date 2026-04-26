@@ -21,7 +21,7 @@ from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
 from yt_dlp.utils import DownloadError as YtDlpDownloadError  # type: ignore[import-untyped]
 
 from shokz.domain.errors import DownloadFailed, SourceUnavailable
-from shokz.domain.models import RawDownload, Track
+from shokz.domain.models import PlaylistInfo, RawDownload, Track
 
 _log = logging.getLogger("shokz.adapter.ytdlp")
 
@@ -82,6 +82,63 @@ class YouTubeSource:
             source_url=str(info.get("webpage_url") or url),
             source_name=self.name,
         )
+
+    async def resolve_playlist(self, url: str) -> PlaylistInfo | None:
+        """Sprint 5: expand a YouTube playlist URL via extract_flat (no per-video metadata).
+
+        Returns:
+            tuple[str, ...]: per-item URLs if `url` is a playlist
+            None: if the URL is a single video (not a playlist)
+        """
+        flat_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "extract_flat": True,
+        }
+
+        def _extract_flat() -> dict[str, Any]:
+            with YoutubeDL(flat_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info is None:
+                    raise SourceUnavailable(f"no info returned for {url}")
+                return dict(info)
+
+        try:
+            info = await asyncio.to_thread(_extract_flat)
+        except YtDlpDownloadError as e:
+            msg = str(e)
+            if any(p in msg for p in ("Private", "Video unavailable", "removed", "deleted")):
+                raise SourceUnavailable(msg) from e
+            raise DownloadFailed(msg) from e
+
+        # F3: yt-dlp doesn't always set _type. If URL has 'list=' AND we got
+        # a dict back, treat as playlist regardless of _type. If URL has no
+        # list= and no _type='playlist', it's genuinely a single video.
+        is_playlist_type = info.get("_type") == "playlist"
+        has_entries = isinstance(info.get("entries"), list)
+        url_is_playlist_shaped = "list=" in url
+        if not (is_playlist_type or has_entries):
+            if url_is_playlist_shaped:
+                # Looks like a playlist URL but yt-dlp returned something weird
+                # (likely throttled / partial). Fail loudly instead of silently
+                # claiming "not a playlist".
+                raise DownloadFailed(
+                    f"playlist URL {url} returned no _type and no entries -- "
+                    f"likely throttled or rate-limited (try again later)"
+                )
+            return None
+
+        entries = info.get("entries") or []
+        item_urls: list[str] = []
+        for entry in entries:
+            if entry is None:
+                continue
+            entry_url = entry.get("url") or entry.get("webpage_url")
+            if entry_url:
+                item_urls.append(str(entry_url))
+        playlist_title = str(info.get("title") or info.get("id") or "playlist")
+        return PlaylistInfo(title=playlist_title, item_urls=tuple(item_urls))
 
     async def download_audio(self, track: Track, dest_dir: Path) -> RawDownload:
         """Download bestaudio via yt-dlp subprocess.

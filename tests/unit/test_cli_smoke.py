@@ -106,3 +106,13 @@ def test_flat_get_handles_logging_alias() -> None:
     cfg = AppConfig()
     # Both forms must resolve.
     assert _flat_get(cfg, "logging.level") == "INFO"
+
+
+def test_shokz_playlist_help() -> None:
+    """Smoke: `shokz playlist --help` exits 0 and shows playlist-related options."""
+    runner = CliRunner()
+    result = runner.invoke(app, ["playlist", "--help"])
+    assert result.exit_code == 0
+    out = result.stdout
+    assert "playlist-subdir" in out
+    assert "yes" in out.lower()
