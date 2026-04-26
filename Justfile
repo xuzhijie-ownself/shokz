@@ -40,6 +40,12 @@ ci: lint typecheck test
 sprint-review N:
     bash scripts/sprint-review.sh {{N}}
 
+# Print a code-review brief for the current sprint diff (PREV..HEAD).
+# Born from Sprint 2 audit — DoD ratchet. After running, dispatch the two
+# parallel reviewers (silent-failure-hunter + python-reviewer) from Claude.
+code-review PREV:
+    bash scripts/code-review.sh {{PREV}}
+
 # Clean caches and build artifacts
 clean:
     rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov build dist *.egg-info

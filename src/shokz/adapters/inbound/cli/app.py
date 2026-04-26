@@ -8,6 +8,7 @@ from __future__ import annotations
 import typer
 
 from shokz import __version__
+from shokz.adapters.inbound.cli.commands.config_cmd import config_app
 from shokz.adapters.inbound.cli.commands.download import download_command
 
 app = typer.Typer(
@@ -18,6 +19,7 @@ app = typer.Typer(
 )
 
 app.command("download")(download_command)
+app.add_typer(config_app, name="config")
 
 
 def _version_callback(value: bool) -> None:

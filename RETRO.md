@@ -71,3 +71,13 @@ Keep:             Two-reviewer parallel pattern. Different angles caught differe
 Drop:             Self-claim of "DoD verified" before code review. Two sprints in a row I would have shipped real bugs without the parallel review pass. Bake `just code-review N` into Sprint 3+ DoD ratchet.
 Try next:         Sprint 3 — write `just code-review N` recipe (or include in `just sprint-review N`) that auto-dispatches the two reviewers against the diff `vN-1..HEAD`. Make code-review a CI job too if feasible.
 Surprise:         The TOCTOU bug was hiding in plain sight: I had `resolve()` BEFORE `encode()`, then `os.replace()`, with seconds of encoding in the gap. With concurrency=3 and same titles, ALL three would resolve to the same path, all encode, all overwrite. I'd have shipped this confidently if not for the review. Plan §0.5 reality-check now reads: Agile is genuinely valuable in EXACTLY FOUR ways for solo work — DoD ratchet + ATDD + per-sprint retro + adversarial code review.
+
+
+## Sprint 3 -- Configuration (TOML + env + CLI) -- 2026-04-27
+**Goal:**         Every Sprint 1+2 default overridable via shokz.toml / env / CLI; `shokz config show` proves which source won.
+**Shipped?:**     yes (v0.3.0)
+**Time actual:**  ~3.5 hours including the code-review fix loop
+Keep:             Code-review tooling paid off on first use. Two reviewers found 3 HIGH bugs (silent _unflatten data loss, broken model_dump round-trip, config-init TOCTOU). Without the review pass, all three would have shipped to v0.3.0. Pattern: build the process tool BEFORE the sprint that needs it ("just code-review N" was created in Sprint 3's first half-hour and immediately blocked the tag).
+Drop:             python heredoc replacements that depend on multi-line code formatting. ruff format reformatted my `_shokz` helper signature mid-batch and broke 6 string-anchored replacements. Either: (a) check format-stability of anchor blocks before the heredoc batch, or (b) use Edit for in-place changes that touch already-formatted code.
+Try next:         Sprint 4 -- ATDD as always. Per plan §0.5 DoD ratchet: atomic-write integration test (kill mid-encode + assert no partial files) becomes mandatory from Sprint 4 onward. Build a `just kill-test N` recipe that wraps the SIGKILL+verify pattern so future sprints can reuse.
+Surprise:         The OSError silent-failure (F3 catch never landed first time) was caught BY the test I wrote for the F3 catch -- the test failed because the catch wasn't there. Self-correcting feedback loop. Without the test, the bare PermissionError would have escaped to users as a Python traceback.

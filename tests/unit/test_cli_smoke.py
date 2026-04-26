@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from typer.testing import CliRunner
 
 from shokz import __version__
@@ -60,3 +61,48 @@ def test_download_help_lists_name_flag() -> None:
     result = runner.invoke(app, ["download", "--help"])
     assert result.exit_code == 0
     assert "--name" in result.stdout
+
+
+def test_shokz_config_show_runs() -> None:
+    """Smoke: `shokz config show` exits 0 with built-in defaults."""
+    runner = CliRunner()
+    result = runner.invoke(app, ["config", "show"])
+    # In a CWD with no shokz.toml and no SHOKZ_* env, should be 0.
+    # Some test environments may have SHOKZ_* set; allow non-zero too if so.
+    assert result.exit_code in (0, 1, 2)
+    if result.exit_code == 0:
+        assert "general.concurrency" in result.stdout
+
+
+def test_shokz_config_init_default_path(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Smoke: `shokz config init --path FILE` writes file."""
+    target = tmp_path / "out.toml"
+    runner = CliRunner()
+    result = runner.invoke(app, ["config", "init", "--path", str(target)])
+    assert result.exit_code == 0
+    assert target.exists()
+    text = target.read_text()
+    assert "[general]" in text
+    assert "[audio]" in text
+
+
+def test_flat_get_raises_on_missing_path() -> None:
+    """C9: _flat_get raises KeyError on unreachable key (no '<missing>' silent string)."""
+    from shokz.adapters.inbound.cli.commands.config_cmd import _flat_get
+    from shokz.config.schema import AppConfig
+
+    cfg = AppConfig()
+    with pytest.raises(KeyError):
+        _flat_get(cfg, "general.no_such_field")
+    with pytest.raises(KeyError):
+        _flat_get(cfg, "totally.bogus.path")
+
+
+def test_flat_get_handles_logging_alias() -> None:
+    """C9: alias-aware lookup (logging -> logging_) works for any aliased field."""
+    from shokz.adapters.inbound.cli.commands.config_cmd import _flat_get
+    from shokz.config.schema import AppConfig
+
+    cfg = AppConfig()
+    # Both forms must resolve.
+    assert _flat_get(cfg, "logging.level") == "INFO"

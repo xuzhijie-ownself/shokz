@@ -36,6 +36,24 @@ shokz download --output ~/swim-mp3s URL              # custom output dir
 If two videos resolve to the same filename, the second auto-suffixes:
 `Foo.mp3` → `Foo (2).mp3` → `Foo (3).mp3` ...
 
+### Configuration (v0.3.0+)
+
+`shokz` reads layered configuration from (low → high precedence):
+
+1. Built-in defaults (`AppConfig` field defaults)
+2. `~/.config/shokz/config.toml`
+3. `./shokz.toml` (project-local)
+4. Env vars: `SHOKZ_GENERAL__CONCURRENCY=7`, `SHOKZ_AUDIO__PRESET=swim-low`, etc.
+5. CLI flags
+
+```bash
+shokz config init                       # write a commented sample shokz.toml
+shokz config show                       # effective config + per-key source
+shokz config path                       # which TOML files were loaded
+SHOKZ_GENERAL__CONCURRENCY=8 shokz config show   # env override visible
+shokz download --concurrency 12 URL     # CLI beats env beats TOML
+```
+
 The following commands ship in upcoming sprints (see `.claude/plan/shokz-downloader.md` §8 and `docs/sprints/`):
 
 ```bash

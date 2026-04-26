@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] -- 2026-04-27
+
+### Added -- Sprint 3: Configuration (TOML + env + CLI)
+- `src/shokz/config/` package: `schema.py` (Pydantic v2 AppConfig with frozen +
+  extra=forbid + populate_by_name), `defaults.py` (DERIVED from AppConfig --
+  single source of truth), `presets.py` (preset -> AudioSpec resolver),
+  `loader.py` (layered merge + per-key source tracking).
+- `shokz config show|init|path` Typer subapp. `show` annotates each value with
+  its source layer; `init` writes a commented sample TOML (atomic exclusive
+  open closes TOCTOU window); `path` lists loaded + missing files.
+- `BatchDownloadUseCase` + composition + CLI `download` command now driven by
+  AppConfig. CLI flags use sentinel `None` defaults so unspecified means
+  "use the config layer's value". Precedence: built-in < ~/.config/shokz/config.toml
+  < ./shokz.toml < env (SHOKZ_*) < CLI.
+- `--preset` typed as `AudioPreset` enum (Typer rejects bogus values at parse time).
+
+### Process improvements (from Sprint 2 retro)
+- `scripts/code-review.sh` + `just code-review <prev-tag>`: prints a markdown
+  brief of the diff vs prev-tag for the human to dispatch reviewers from
+  Claude. Code review is now a non-skippable pre-tag DoD ratchet item.
+
+### Code-review audit fixes (Sprint 3 review, same v0.3.0)
+Two parallel reviewers (silent-failure-hunter + python-reviewer) found
+9 substantive findings (3 HIGH). All addressed before tag:
+
+- **C1 [HIGH]** `_unflatten` collision detection: scalar/dict conflict now
+  raises ConfigLoadError instead of silently dropping data.
+- **C2 [HIGH]** `populate_by_name=True` on AppConfig: model_dump() output
+  round-trips cleanly through model_validate (was broken on `logging_` alias).
+- **C3 [HIGH]** `config init` uses atomic `"x"` open mode: TOCTOU race window
+  between `exists()` and `open()` closed.
+- **F3 [HIGH silent-failure]** OSError in `_load_toml_flat` now translated to
+  ConfigLoadError (was uncaught, leaked Python traceback).
+- **C4** `_coerce_env_string` rejects inf/nan + leading-zero ambiguity.
+- **C5** Dropped `_ = logging` antipattern.
+- **C6** `config init` writes commented TOML (was bare key=value -- silent AC violation).
+- **C7** TOML validation error message now names the source file/layer.
+- **C9** `_flat_get` raises KeyError on unreachable path; alias-aware lookup
+  via `model_fields` metadata (no more hardcoded `if part == "logging"`).
+- **C10** Acceptance tests override HOME -> tmp_path so the developer's real
+  ~/.config/shokz/config.toml doesn't pollute test runs.
+- **C11** Replaced `python -c` subprocess test with direct in-process loader
+  call (was bad smell; same scenario covered by unit + CLI smoke).
+- **C12** `BUILTIN_DEFAULTS` derived from `AppConfig().model_dump(by_alias=True)`
+  (was duplicated; single source now).
+
+### Verified
+- 79 unit tests passing (was 60, +19 review-coverage tests)
+- Coverage 92.57% on domain + application + observability
+- 11 INTEGRATION=1 acceptance tests passing (Sprint 1: 4 + 2: 7 + 3: 0 yet
+  -- Sprint 3 has 9 unit-friendly + 1 INTEGRATION-gated for the encoded-bitrate AC)
+- `just sprint-review 3`: 11/11 Sprint 3 scenarios covered
+- Self-demos (clean state): config show / TOML override / env override /
+  config init (with refuses-overwrite path) / config path -- all pass
+
+### Sprint 3 deliberate scope (deferred per spec)
+- skip_existing flag wiring                -> Sprint 4.5 (lands with manifest)
+- cap_to_source flag wiring                -> Sprint 7
+- retry config (max_attempts, backoff)     -> Sprint 7
+- ui.progress = json|rich|plain|none       -> Sprint 6
+- sources.youtube.cookies_*                -> later
+- disk_safety_multiplier                   -> Sprint 8
+All v3.1 plan §4 knobs not used by Sprints 1+2 today are STUBBED but produce
+no behavior change in Sprint 3.
+
 ## [0.2.0] -- 2026-04-26
 
 ### Added -- Sprint 2: Title-based filenames + --name override
