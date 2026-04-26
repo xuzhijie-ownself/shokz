@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tests/acceptance/test_sprint_1_download.py`: Gherkin AC as pytest tests,
   gated by `INTEGRATION=1`
 
+### Audit fixes (Sprint 1 review, same v0.1.0)
+- Added 2 missing Gherkin acceptance tests: concurrent-3-URLs, mixed-valid-invalid
+- Strengthened `test_no_source_can_handle_url_raises` (was tautology after fix)
+- Broadened `_process_one` exception handler to isolate ANY exception type per
+  Sprint 1 non-functional contract; Sprint 7 will narrow via error translation
+  table (plan §7.1)
+- Updated `README.md` Use section to reflect what actually shipped in v0.1.0
+- Re-ran self-demo from truly clean `./downloads/` — 3/3 in 6.7s
+
 ### Verified
 - 10 unit tests passing; **94.34%** coverage on `domain` + `application` + `observability`
 - 2 integration tests passing against real YouTube (gated)

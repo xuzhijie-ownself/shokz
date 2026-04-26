@@ -114,14 +114,49 @@ async def test_no_source_can_handle_url_raises(tmp_path: Path) -> None:
 
     result = await use_case.execute(
         BatchDownloadInput(
-            urls=("https://vimeo.com/12345",),  # FakeVideoSource won't claim this
+            urls=("https://vimeo.com/12345",),  # FakeVideoSource won't claim this URL
             output_dir=tmp_path / "downloads",
             spec=SWIM_STANDARD,
             concurrency=1,
         )
     )
 
-    # gather propagates the ValueError as a returned result; current impl raises.
-    # Sprint 1: this path goes through asyncio.gather without return_exceptions,
-    # so the exception bubbles. Acceptance: at minimum nothing was downloaded.
-    assert result.failed >= 0  # tolerated; Sprint 7 will formalize.
+    # _process_one catches ValueError from _select_source and produces a FAILED
+    # TrackResult — the batch survives, the unsupported URL is reported.
+    assert result.succeeded == 0
+    assert result.failed == 1
+    assert result.results[0].status is TrackStatus.FAILED
+    assert result.results[0].track is None
+    assert result.results[0].error is not None
+    assert "no source can handle" in result.results[0].error.lower()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_exception_in_resolve_is_isolated(tmp_path: Path) -> None:
+    """Sprint 1 non-functional: per-track failure isolation must catch ANY exception type."""
+
+    class _ExplodingSource(FakeVideoSource):
+        async def resolve(self, url: str):  # type: ignore[override]
+            self.resolve_calls.append(url)
+            raise RuntimeError("BOOM — non-ShokzError exception escaping resolve")
+
+    source = _ExplodingSource()
+    encoder = FakeAudioEncoder()
+    progress = FakeProgressReporter()
+    use_case = BatchDownloadUseCase(sources=(source,), encoder=encoder, progress=progress)
+
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A, _URL_B),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=2,
+        )
+    )
+
+    assert result.succeeded == 0
+    assert result.failed == 2
+    for r in result.results:
+        assert r.status is TrackStatus.FAILED
+        assert r.error is not None
+        assert "BOOM" in r.error or "unexpected" in r.error.lower()

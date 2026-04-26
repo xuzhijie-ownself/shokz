@@ -113,6 +113,16 @@ class BatchDownloadUseCase:
                 error=f"resolve failed: {e}",
                 elapsed_s=time.monotonic() - started,
             )
+        except Exception as e:  # Sprint 1 isolation; Sprint 7 narrows the taxonomy.
+            _log.exception("unexpected resolve exception for %s", url)
+            self._progress.finish(track_id=url, status=TrackStatus.FAILED, message=str(e))
+            return TrackResult(
+                track=None,
+                status=TrackStatus.FAILED,
+                final_path=None,
+                error=f"resolve failed (unexpected): {e!r}",
+                elapsed_s=time.monotonic() - started,
+            )
 
         set_track_id(track.id)
         try:
@@ -148,6 +158,16 @@ class BatchDownloadUseCase:
                 status=TrackStatus.FAILED,
                 final_path=None,
                 error=str(e),
+                elapsed_s=time.monotonic() - started,
+            )
+        except Exception as e:  # Sprint 1 isolation; Sprint 7 narrows the taxonomy.
+            _log.exception("unexpected download/encode exception for %s", track.id)
+            self._progress.finish(track_id=track.id, status=TrackStatus.FAILED, message=str(e))
+            return TrackResult(
+                track=track,
+                status=TrackStatus.FAILED,
+                final_path=None,
+                error=f"unexpected: {e!r}",
                 elapsed_s=time.monotonic() - started,
             )
         finally:

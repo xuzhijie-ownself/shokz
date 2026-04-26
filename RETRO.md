@@ -35,3 +35,19 @@ Keep:             ATDD discipline — Gherkin AC in sprint-1.md became the test 
 Drop:             Per-line Edit ceremony for trivial lint fixes (line wraps, etc.). Continue using bash heredoc for small batched code rewrites where Edit's gate cost > the change.
 Try next:         Sprint 2 — write Gherkin AC FIRST, add a property-based test for the filename sanitizer (pathvalidate edge cases — empty stem, unicode, FAT-reserved chars). Verify --name override on a single-URL invocation in the smoke suite.
 Surprise:         ffmpeg refuses non-standard output extensions (.mp3.partial) without an explicit `-f mp3`. The unit tests passed (FakeAudioEncoder doesn't model this), only the self-demo against real ffmpeg revealed it. Lesson: integration tests / self-demo from clean state are NOT optional, even on MVP.
+
+
+## Sprint 1 — Sprint Review audit (closing DoD gaps caught) — 2026-04-26
+**Goal:**         Genuinely satisfy every Sprint 1 DoD item before declaring done.
+**Shipped?:**     yes (still v0.1.0, tag moved to new HEAD; safe — no remote)
+**Time actual:**  ~30 min (the audit + fixes)
+Keep:             Self-Sprint-Review caught 5 real gaps that the initial "DoD checklist signed" missed:
+                    1. 2 of 5 Gherkin scenarios had no executable test (only proven by self-demo)
+                    2. README still showed forward-reference comments
+                    3. test_no_source_can_handle_url_raises had a tautology assertion
+                    4. _process_one only caught ShokzError + ValueError; bare RuntimeError/OSError would kill the batch
+                    5. Self-demo had stale .tmp/.webm files from earlier failed run (not truly clean)
+                  The DoD-as-ratchet bit. Without an explicit review, all 5 would have passed silently into "Sprint 1 done."
+Drop:             Self-DoD ticking on auto-pilot. Add a "Sprint Review" pre-tag step that re-reads the spec's AC list and grep's test names for coverage.
+Try next:         Sprint 2 — write a `scripts/sprint-review.sh` (or just add a recipe to `Justfile`) that diffs Gherkin Scenarios in docs/sprints/sprint-N.md against test names in tests/. Fail if any scenario lacks a test. Bake into pre-tag DoD.
+Surprise:         Catching MY OWN claim of "DoD verified" being false within an hour of declaring it. The plan §0.5 reality-check ("Agile is genuinely valuable for THREE things — DoD ratchet is one") just paid for itself for the first time.
