@@ -35,6 +35,11 @@ integration:
 # Run everything that CI runs
 ci: lint typecheck test
 
+# Verify every Gherkin Scenario in docs/sprints/sprint-N.md has a matching pytest test.
+# Born from Sprint 1 audit — see RETRO.md. Pre-tag DoD check.
+sprint-review N:
+    bash scripts/sprint-review.sh {{N}}
+
 # Clean caches and build artifacts
 clean:
     rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov build dist *.egg-info

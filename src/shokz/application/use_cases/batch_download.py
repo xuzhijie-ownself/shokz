@@ -14,9 +14,11 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from shokz.application.policies.filename_resolver import FilenameResolver
 from shokz.application.ports.outbound.encoder import AudioEncoderPort
 from shokz.application.ports.outbound.progress import ProgressReporterPort
 from shokz.application.ports.outbound.video_source import VideoSourcePort
@@ -26,6 +28,10 @@ from shokz.observability.logging import set_track_id
 
 _log = logging.getLogger("shokz.usecase.batch_download")
 
+# Sprint 2: factory so each invocation gets a resolver bound to the
+# requested output_dir (which can vary per call via --output).
+FilenameResolverFactory = Callable[[Path], FilenameResolver]
+
 
 @dataclass(frozen=True, slots=True)
 class BatchDownloadInput:
@@ -34,6 +40,7 @@ class BatchDownloadInput:
     spec: AudioSpec
     concurrency: int = 3
     keep_raw: bool = False
+    name_override: str | None = None  # Sprint 2: --name flag for single URL
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,24 +65,43 @@ class BatchDownloadUseCase:
         sources: tuple[VideoSourcePort, ...],
         encoder: AudioEncoderPort,
         progress: ProgressReporterPort,
+        filename_resolver_factory: FilenameResolverFactory,
     ) -> None:
         if not sources:
             raise ValueError("at least one VideoSourcePort required")
         self._sources = sources
         self._encoder = encoder
         self._progress = progress
+        self._resolver_factory = filename_resolver_factory
 
     async def execute(self, inp: BatchDownloadInput) -> BatchDownloadResult:
         tmp_dir = inp.output_dir / ".tmp"
         inp.output_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
+        # Sprint 2: --name only valid with exactly one URL.
+        if inp.name_override is not None and len(inp.urls) != 1:
+            from shokz.domain.errors import NameAmbiguous
+
+            raise NameAmbiguous(f"--name requires exactly one URL, got {len(inp.urls)}")
+
+        # Build the per-run resolver from the configured output_dir.
+        resolver = self._resolver_factory(inp.output_dir)
+
         sem = asyncio.Semaphore(inp.concurrency)
         started = time.monotonic()
 
         async def bounded(url: str) -> TrackResult:
             async with sem:
-                return await self._process_one(url, inp.output_dir, tmp_dir, inp.spec, inp.keep_raw)
+                return await self._process_one(
+                    url,
+                    inp.output_dir,
+                    tmp_dir,
+                    inp.spec,
+                    inp.keep_raw,
+                    resolver,
+                    inp.name_override,
+                )
 
         results = await asyncio.gather(*(bounded(u) for u in inp.urls))
         return BatchDownloadResult(results=tuple(results), elapsed_s=time.monotonic() - started)
@@ -87,6 +113,8 @@ class BatchDownloadUseCase:
         tmp_dir: Path,
         spec: AudioSpec,
         keep_raw: bool,
+        resolver: FilenameResolver,
+        name_override: str | None,
     ) -> TrackResult:
         started = time.monotonic()
         try:
@@ -130,9 +158,13 @@ class BatchDownloadUseCase:
 
             raw = await source.download_audio(track, dest_dir=tmp_dir)
 
-            # Sprint 1 filename: {video_id}.mp3 — Sprint 2 swaps to title-based.
+            # Sprint 2: title-based filename via resolver (with --name override + collision suffix).
+            final = resolver.resolve(
+                track,
+                name_override=name_override,
+                exists=lambda p: p.exists(),
+            )
             partial = tmp_dir / f"{track.id}.mp3.partial"
-            final = output_dir / f"{track.id}.mp3"
 
             await self._encoder.encode(raw.path, partial, spec)
 

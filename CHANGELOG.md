@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] -- 2026-04-26
+
+### Added -- Sprint 2: Title-based filenames + --name override
+- `domain/filenames.py`: `sanitize_filename` (wraps `pathvalidate`),
+  `render_template` (tokens: title, uploader, id, source, duration, date),
+  `fallback_stem` (untitled-{id}), UTF-8-aware byte truncation.
+  Default template: `{title}`. Default max length: 120 bytes.
+- `domain/paths.py`: `is_path_within`, `assert_within` traversal guards.
+- `domain/errors.py`: extended with `NameOutsideOutputDir`,
+  `FilenameCollision`, `NameAmbiguous`.
+- `application/policies/filename_resolver.py`: `FilenameResolver`
+  pure class with default suffix-collision policy
+  (`Foo.mp3` → `Foo (2).mp3` → `Foo (3).mp3` ...). Path-traversal guarded.
+- `BatchDownloadUseCase`: now takes `filename_resolver_factory`;
+  `BatchDownloadInput` gains `name_override: str | None`.
+- `composition.py`: wires the resolver factory.
+- CLI `download`: new `--name "Custom Name"` flag with single-URL guard
+  (exit 2 + clear stderr message when given multiple URLs).
+- `tests/unit/domain/test_filenames.py`: 16 unit tests including
+  property-based "every title produces safe-or-empty stem".
+- `tests/unit/application/test_filename_resolver.py`: 6 resolver tests.
+- `tests/acceptance/test_sprint_2_filenames.py`: 7 Gherkin scenarios as
+  pytest tests (gated by INTEGRATION=1).
+- `tests/unit/test_cli_smoke.py`: extended with `--name` flag tests.
+- README.md Use section updated with `--name` example.
+
+### Process improvements (from Sprint 1 retro)
+- `scripts/sprint-review.sh` + `just sprint-review N`: mechanical pre-tag
+  check that diffs Gherkin Scenarios in `docs/sprints/sprint-N.md` against
+  pytest test names. Catches DoD-erosion of "I'll add tests next sprint".
+- `Justfile`: `just sprint-review N` recipe added.
+
+### Verified
+- 36 unit tests + 7 CLI smoke = 43 unit passing; 84% coverage on
+  `domain` + `application` + `observability`
+- 11 INTEGRATION=1 acceptance tests passing (Sprint 1: 4, Sprint 2: 7)
+- `just sprint-review 2`: 9/9 Sprint 2 scenarios covered
+- Self-demos (clean state):
+  - `shokz download <URL>` -> `downloads/Me at the zoo.mp3` (NOT id-named!)
+  - `shokz download --name "My Custom Mix" <URL>` -> `My Custom Mix.mp3`
+  - `shokz download --name "Collision Demo" <URL>` twice -> `.mp3` + ` (2).mp3`
+  - `shokz download --name "X" URL1 URL2` -> exit 2 + clear stderr message
+- ruff lint + format + mypy --strict all clean
+
+### Sprint 2 deliberate scope (deferred per spec)
+- Configurable filename TEMPLATE + non-suffix collision policies -> Sprint 3
+- original_title preservation in manifest                         -> Sprint 4
+- Reconciliation of orphan files                                  -> Sprint 4.5
+
 ## [0.1.0] — 2026-04-26
 
 ### Added — Sprint 1: POC parity in hexagonal shell (MVP)

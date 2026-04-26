@@ -24,3 +24,16 @@ class DownloadFailed(ShokzError):
 # Encoding
 class EncodingFailed(ShokzError):
     """ffmpeg returned a non-zero exit, or output was unusable."""
+
+
+# Filename / path errors (Sprint 2)
+class NameOutsideOutputDir(ShokzError):
+    """A filename / --name override resolves outside the configured output_dir."""
+
+
+class FilenameCollision(ShokzError):
+    """Filename collision and policy disallows resolution (Sprint 3 'fail' policy)."""
+
+
+class NameAmbiguous(ShokzError):
+    """--name was provided with multiple URLs (semantically ambiguous)."""

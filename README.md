@@ -25,15 +25,20 @@ just hooks-install  # one-time pre-commit setup
 
 ```bash
 shokz download "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+# -> downloads/Me at the zoo.mp3   (title-based since v0.2.0; was id-named in v0.1.0)
+
+shokz download --name "Sleep Mix Vol 1" "<URL>"      # custom filename (single-URL only)
 shokz download -c 4 URL1 URL2 URL3 URL4              # 4-way concurrency
 shokz download --keep-raw URL                        # keep .webm in .tmp/
 shokz download --output ~/swim-mp3s URL              # custom output dir
 ```
 
+If two videos resolve to the same filename, the second auto-suffixes:
+`Foo.mp3` → `Foo (2).mp3` → `Foo (3).mp3` ...
+
 The following commands ship in upcoming sprints (see `.claude/plan/shokz-downloader.md` §8 and `docs/sprints/`):
 
 ```bash
-shokz download --name "Sleep Mix" "<URL>"            # Sprint 2 (title override)
 shokz playlist "<playlist URL>"                      # Sprint 5
 shokz retry [RUN_ID]                                 # Sprint 8
 shokz library list|show|verify                       # Sprint 4.5 / 9

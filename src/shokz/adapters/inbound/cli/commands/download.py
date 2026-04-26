@@ -20,6 +20,7 @@ import typer
 
 from shokz.application.use_cases.batch_download import BatchDownloadInput
 from shokz.composition import build_container
+from shokz.domain.errors import NameAmbiguous, NameOutsideOutputDir
 from shokz.domain.models import TrackStatus
 from shokz.domain.presets import SWIM_STANDARD
 from shokz.observability.logging import configure_logging, set_run_id
@@ -32,6 +33,11 @@ def download_command(
         "--output",
         "-o",
         help="Output directory for final MP3s.",
+    ),
+    name: str = typer.Option(
+        "",
+        "--name",
+        help="Override filename for a single URL (filename only, no extension).",
     ),
     concurrency: int = typer.Option(3, "--concurrency", "-c", min=1, max=16),
     keep_raw: bool = typer.Option(
@@ -48,6 +54,15 @@ def download_command(
         "run_id=%s urls=%d concurrency=%d", run_id, len(urls), concurrency
     )
 
+    # Sprint 2: --name only valid with exactly one URL.
+    name_override = name if name else None
+    if name_override is not None and len(urls) != 1:
+        typer.echo(
+            f"error: --name requires exactly one URL, got {len(urls)}",
+            err=True,
+        )
+        sys.exit(2)
+
     container = build_container()
     inp = BatchDownloadInput(
         urls=tuple(urls),
@@ -55,9 +70,17 @@ def download_command(
         spec=SWIM_STANDARD,
         concurrency=concurrency,
         keep_raw=keep_raw,
+        name_override=name_override,
     )
 
-    result = asyncio.run(container.batch_download.execute(inp))
+    try:
+        result = asyncio.run(container.batch_download.execute(inp))
+    except NameAmbiguous as e:
+        typer.echo(f"error: {e}", err=True)
+        sys.exit(2)
+    except NameOutsideOutputDir as e:
+        typer.echo(f"error: {e}", err=True)
+        sys.exit(2)
 
     typer.echo(
         f"\n{result.succeeded}/{len(result.results)} succeeded "

@@ -51,3 +51,13 @@ Keep:             Self-Sprint-Review caught 5 real gaps that the initial "DoD ch
 Drop:             Self-DoD ticking on auto-pilot. Add a "Sprint Review" pre-tag step that re-reads the spec's AC list and grep's test names for coverage.
 Try next:         Sprint 2 — write a `scripts/sprint-review.sh` (or just add a recipe to `Justfile`) that diffs Gherkin Scenarios in docs/sprints/sprint-N.md against test names in tests/. Fail if any scenario lacks a test. Bake into pre-tag DoD.
 Surprise:         Catching MY OWN claim of "DoD verified" being false within an hour of declaring it. The plan §0.5 reality-check ("Agile is genuinely valuable for THREE things — DoD ratchet is one") just paid for itself for the first time.
+
+
+## Sprint 2 -- Title-based filenames + --name override -- 2026-04-26
+**Goal:**         Files in ./downloads/ are named after the video title (not ID); --name override; collision suffix.
+**Shipped?:**     yes (v0.2.0)
+**Time actual:**  ~1.5 hours of focused work
+Keep:             ATDD discipline + sprint-review tooling. Wrote sprint-2.md with 9 Gherkin scenarios FIRST; the just sprint-review 2 check stayed amber until each scenario had a matching test name. Sprint 1's audit pain literally paid for itself within the next sprint -- the gap-detection that took manual review last time took 0.5 seconds this time.
+Drop:             Verbose Edit-tool ceremony for trivial in-place tweaks (line wraps, single-keyword changes, single-import additions). Bash heredoc for new-file batches; targeted python3 - <<PY for in-place rewrites is the right balance.
+Try next:         Sprint 3 (configuration). Land Pydantic AppConfig + TOML loader + env+CLI merge. Wire the existing hard-coded defaults (concurrency=3, SWIM_STANDARD preset, output_dir, --name) through the new config layer. Add `shokz config show/init/path` commands. Use `just sprint-review 3` to keep the ratchet in place.
+Surprise:         pathvalidate's `replacement_text="_"` silently substituted underscores for FAT-reserved chars, so an all-punctuation title became "______" not "" -- breaking the AC fallback. Caught by the unit tests written FIRST (4 reds before code change). ATDD literally saved the day for the second time this sprint.

@@ -33,3 +33,30 @@ def test_download_help_lists_options() -> None:
     assert "--output" in out
     assert "--concurrency" in out
     assert "--keep-raw" in out
+
+
+def test_name_flag_rejects_multiple_urls() -> None:
+    """Sprint 2 AC: '--name flag rejects multiple URLs'."""
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "download",
+            "--name",
+            "X",
+            "https://www.youtube.com/watch?v=AAAAAAAAAAA",
+            "https://www.youtube.com/watch?v=BBBBBBBBBBB",
+        ],
+    )
+    assert result.exit_code != 0
+    combined = (result.stdout + (result.stderr or "")).lower()
+    assert "name" in combined
+    assert "requires" in combined or "exactly one" in combined
+
+
+def test_download_help_lists_name_flag() -> None:
+    """--name flag is documented in --help output."""
+    runner = CliRunner()
+    result = runner.invoke(app, ["download", "--help"])
+    assert result.exit_code == 0
+    assert "--name" in result.stdout
