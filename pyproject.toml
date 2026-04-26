@@ -76,6 +76,11 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "S105", "S106"]
 "poc/**/*.py" = ["ALL"]
+# Typer commands: B008 false-positive — typer.Argument/Option in defaults IS the documented Typer pattern.
+"src/shokz/adapters/inbound/cli/commands/**/*.py" = ["B008"]
+# Domain errors: N818 (Error suffix) intentionally violated — taxonomy uses
+# short PascalCase names per plan §7 (SourceUnavailable, DownloadFailed, etc.).
+"src/shokz/domain/errors.py" = ["N818"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -102,7 +107,10 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-    "--cov=src/shokz",
+    # Coverage scoped to layers with unit tests; adapters via integration tests.
+    "--cov=src/shokz/domain",
+    "--cov=src/shokz/application",
+    "--cov=src/shokz/observability",
     "--cov-report=term-missing",
     "--cov-report=xml",
     "--cov-fail-under=80",
@@ -113,7 +121,9 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["src/shokz"]
+# Per plan §0: 80% gate scoped to layers covered by unit tests.
+# Adapters use INTEGRATION=1-gated tests (not counted here).
+source = ["src/shokz/domain", "src/shokz/application", "src/shokz/observability"]
 branch = true
 
 [tool.coverage.report]
