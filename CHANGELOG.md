@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] -- 2026-04-27
+
+### Added -- Sprint 4.5: Skip-existing + reconciliation + library list/show/verify
+This is the recovery story for Sprint 4's SF-4 orphan-state window.
+
+- `application/policies/`:
+  - `skip_existing.py`: `SkipExistingPolicy` -- requires BOTH manifest entry
+    AND file on disk before returning `SKIPPED`. Manifest-stale and
+    disk-deleted both correctly trigger re-download.
+  - `reconciliation.py`: `ReconciliationPolicy.scan()` returns ok pairs +
+    orphan files (on disk, not in manifest) + orphan entries (in manifest,
+    not on disk).
+- `application/ports/outbound/manifest.py`: extended ManifestPort with
+  `find_by_track(source, track_id)` and `iter_all()` (read API).
+- `adapters/outbound/jsonl_manifest.py`: implemented read API (linear scan
+  via `_read_jsonl`); SF-1 fix: counts skipped lines and raises
+  `ManifestReadError` if the WHOLE manifest is corrupt.
+- `application/use_cases/library_query.py`: `ListLibraryUseCase`,
+  `ShowLibraryUseCase`, `VerifyLibraryUseCase`.
+- `adapters/inbound/cli/commands/library_cmd.py`: `shokz library list`
+  (table), `library show TRACK_ID` (single entry detail with --source),
+  `library verify` (reconciliation, exits non-zero on mismatch).
+- `BatchDownloadInput.force` field; download command `--force` flag bypasses
+  skip-existing.
+- `BatchDownloadResult.skipped` count + CLI summary handles SKIPPED status.
+- Startup reconciliation scan via `asyncio.create_task` -- if any orphan
+  files exist, log a WARNING pointing the user to `shokz library verify`.
+- `TrackStatus.SKIPPED` enum value.
+- `domain/errors.py`: `ManifestReadError` for total manifest corruption.
+
+### Code-review audit fixes (Sprint 4.5 review, same v0.5.0)
+Two parallel reviewers found 10 substantive issues (1 CRITICAL, 5 HIGH).
+All addressed before tag:
+
+- **HIGH (INTEGRATION)**: CLI download command treated SKIPPED as FAIL in
+  the summary loop. Now distinct OK / SKIP / FAIL rows.
+- **HIGH (INTEGRATION)**: Sprint 2 collision test was blocked by Sprint 4.5
+  skip-existing -- updated to use `--force`.
+- **HIGH py-rev #2**: symlink + name-ambiguity guards moved BEFORE
+  `asyncio.create_task` so they cannot leave an orphan task on early-exit.
+- **HIGH py-rev #4 / both**: `ShowLibraryUseCase.execute` source parameter
+  now required at use-case level (CLI still defaults to "youtube").
+- **HIGH (both)**: documented that reconciliation scans only top-level *.mp3
+  -- Sprint 5 playlist subdirs require a forward-compat extension.
+- **CRITICAL py-rev #1**: investigated -- the reviewer was wrong about the
+  Protocol shape; mypy confirms async generators correctly satisfy
+  `def iter_all() -> AsyncIterator`. No change needed.
+- **MED SF-1**: `_read_jsonl` counts skipped lines + raises
+  `ManifestReadError` if all lines are malformed (vs silently empty list).
+- **MED py-rev #3**: `ReconciliationReport` tuple defaults inlined as
+  `= ()` (immutable; safer than `field(default_factory=tuple)`).
+- **MED py-rev #5**: `_read_jsonl` typing consistency tightened.
+
+**Deferred (with reason):**
+- SF-2 fire-and-forget task post-execute orphan: internal try/except in
+  `_reconcile_warn` already prevents exception escape; storing the task
+  reference is documented as cosmetic. Sprint 8's signal handling adds
+  proper task lifecycle.
+- SF-4 manifest snapshot per-batch: skip-existing currently re-reads per
+  track. For typical batch sizes (~50 URLs, ~1000 manifest rows) the
+  perf is fine; Sprint 5+ caching deferred.
+- iter_all true streaming: documented as full-read; v2 SQLite migration
+  will revisit.
+- SkipDecision/TrackStatus string-overlap: cosmetic, deferred.
+- Reconciliation scan flat *.mp3 only: Sprint 5 DoD ratchet item.
+
+### Verified
+- ruff check + format: clean
+- mypy --strict: clean (44 source files)
+- pytest unit: 94 passed (was 89 in v0.4.0, +5 Sprint 4.5), 91% cov
+- INTEGRATION=1 acceptance: 32 passed in ~109s (Sprint 1: 4 + 2: 7 +
+  3: 10 + 4: 2 + 4.5: 9)
+- just sprint-review 4.5: 12/12 covered
+- just kill-test on 7-hour video: PASS (Sprint 4 ratchet still holds)
+- Self-demo (clean state):
+  - download URL -> *.mp3 + manifest entry (Sprint 4 still works)
+  - re-download same URL -> instant SKIP (no encode), exit 0
+  - delete the .mp3 manually -> re-download triggers (manifest-only
+    skip insufficient, per AC scenario 3)
+  - --force re-downloads even with manifest hit -> Foo (2).mp3 produced
+
+### Sprint 4.5 deliberate scope (deferred per spec)
+- retry policy                              -> Sprint 7
+- Rich progress bars in library list         -> Sprint 6
+- cross-process file lock around manifest    -> Sprint 8
+- SQLite manifest backend                    -> v2
+- shokz library export / import              -> deferred
+- manifest schema migration story            -> Sprint 5+ when needed
+
 ## [0.4.0] -- 2026-04-27
 
 ### Added -- Sprint 4: Manifest + atomic writes + integrity checks

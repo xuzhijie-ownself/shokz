@@ -126,6 +126,17 @@ class FakeManifest:
     async def record_failure(self, entry: FailureEntry) -> None:
         self.failures.append(entry)
 
+    async def find_by_track(self, source: str, track_id: str):  # type: ignore[no-untyped-def]
+        latest = None
+        for e in self.successes:
+            if e.source == source and e.track_id == track_id:
+                latest = e
+        return latest
+
+    async def iter_all(self):  # type: ignore[no-untyped-def]
+        for e in self.successes:
+            yield e
+
 
 @dataclass
 class FakeFileSystem:

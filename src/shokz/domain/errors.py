@@ -50,3 +50,7 @@ class SourceFileCorrupt(ShokzError):
 
 class ManifestInconsistent(ShokzError):
     """The on-disk manifest disagrees with the actual files (Sprint 4.5 + reconciliation)."""
+
+
+class ManifestReadError(ShokzError):
+    """Manifest file unreadable or wholly corrupt (Sprint 4.5 SF-1 + SF-7)."""

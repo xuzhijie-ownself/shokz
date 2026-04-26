@@ -12,7 +12,8 @@ class TrackStatus(StrEnum):
 
     SUCCESS = "success"
     FAILED = "failed"
-    # SKIPPED, DRY_RUN reserved for Sprint 4.5 / Sprint 7
+    SKIPPED = "skipped"  # Sprint 4.5: skip-existing match
+    # DRY_RUN reserved for Sprint 7
 
 
 @dataclass(frozen=True, slots=True)

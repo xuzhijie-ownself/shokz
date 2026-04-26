@@ -36,6 +36,31 @@ shokz download --output ~/swim-mp3s URL              # custom output dir
 If two videos resolve to the same filename, the second auto-suffixes:
 `Foo.mp3` → `Foo (2).mp3` → `Foo (3).mp3` ...
 
+### Skip-existing + library inspection (v0.5.0+)
+
+Re-running `shokz download` on already-completed URLs is near-instant — the
+manifest-driven skip short-circuits before any network or encoding work:
+
+```bash
+shokz download <URL>                    # first time: real download
+shokz download <URL>                    # second time: SKIP in <1s
+shokz download --force <URL>            # re-download anyway (collision suffix)
+
+shokz library list                      # table of every manifest entry
+shokz library show <track_id>           # full detail for one entry
+shokz library verify                    # reconcile manifest <-> disk
+                                        # exit 1 + diagnostic on mismatch
+```
+
+`library verify` surfaces:
+- **orphan files**: `*.mp3` on disk with no manifest entry (likely Sprint 4
+  SF-4 orphan window — process killed between os.replace and manifest record)
+- **orphan entries**: manifest rows whose `mp3_path` no longer exists on disk
+  (manually deleted)
+
+A startup reconciliation scan also warns once per `shokz download` invocation
+if orphan files are detected.
+
 ### Crash-safe writes + manifest (v0.4.0+)
 
 Every successful download is recorded in `downloads/.shokz/manifest.jsonl`

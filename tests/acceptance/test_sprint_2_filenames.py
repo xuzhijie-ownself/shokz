@@ -98,7 +98,17 @@ def test_filename_collision_auto_suffixes_default_policy(fresh_downloads: Path) 
     assert r1.returncode == 0, r1.stderr
     assert (fresh_downloads / "Collision Test.mp3").exists()
 
-    r2 = _shokz("download", "-o", str(fresh_downloads), "--name", "Collision Test", _SHORT_URL)
+    # Sprint 4.5: skip-existing now blocks the second download by manifest
+    # match -- need --force to exercise the collision policy.
+    r2 = _shokz(
+        "download",
+        "-o",
+        str(fresh_downloads),
+        "--force",
+        "--name",
+        "Collision Test",
+        _SHORT_URL,
+    )
     assert r2.returncode == 0, r2.stderr
     assert (fresh_downloads / "Collision Test (2).mp3").exists()
     # Original file untouched

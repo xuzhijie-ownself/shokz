@@ -58,6 +58,11 @@ def download_command(
         "--keep-raw/--no-keep-raw",
         help="Keep .tmp/ raw downloads after encode. (config: general.keep_raw)",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-download even if a manifest entry + file already exist.",
+    ),
     preset: AudioPreset | None = typer.Option(
         None,
         "--preset",
@@ -127,6 +132,7 @@ def download_command(
         concurrency=config.general.concurrency,
         keep_raw=config.general.keep_raw,
         name_override=name_override,
+        force=force,
     )
 
     try:
@@ -160,13 +166,16 @@ def download_command(
 
     typer.echo(
         f"\n{result.succeeded}/{len(result.results)} succeeded "
-        f"({result.failed} failed) in {result.elapsed_s:.1f}s"
+        f"({result.skipped} skipped, {result.failed} failed) "
+        f"in {result.elapsed_s:.1f}s"
     )
     for r in result.results:
         if r.status is TrackStatus.SUCCESS and r.final_path is not None:
-            typer.echo(f"  OK   {r.final_path.name}")
+            typer.echo(f"  OK    {r.final_path.name}")
+        elif r.status is TrackStatus.SKIPPED and r.final_path is not None:
+            typer.echo(f"  SKIP  {r.final_path.name} (already in manifest)")
         else:
-            typer.echo(f"  FAIL {r.error or '(unknown)'}", err=True)
+            typer.echo(f"  FAIL  {r.error or '(unknown)'}", err=True)
 
     if result.failed > 0:
         sys.exit(1)

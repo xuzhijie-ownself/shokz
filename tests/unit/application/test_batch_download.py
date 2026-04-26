@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from shokz.application.policies.filename_resolver import FilenameResolver
+from shokz.application.policies.reconciliation import ReconciliationPolicy
+from shokz.application.policies.skip_existing import SkipExistingPolicy
 from shokz.application.use_cases.batch_download import (
     BatchDownloadInput,
     BatchDownloadUseCase,
@@ -37,13 +39,21 @@ async def test_use_case_orchestration_three_urls_all_succeed(tmp_path: Path) -> 
     source = FakeVideoSource()
     encoder = FakeAudioEncoder()
     progress = FakeProgressReporter()
+    _m = FakeManifest()
+    _fs = FakeFileSystem()
     use_case = BatchDownloadUseCase(
         sources=(source,),
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
-        manifest=FakeManifest(),
-        filesystem=FakeFileSystem(),
+        manifest=_m,
+        filesystem=_fs,
+        skip_existing=SkipExistingPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
     )
 
     result = await use_case.execute(
@@ -89,13 +99,21 @@ async def test_failure_is_isolated_per_track(tmp_path: Path) -> None:
     source = FakeVideoSource(fail_resolve_for=frozenset({_URL_B}))
     encoder = FakeAudioEncoder()
     progress = FakeProgressReporter()
+    _m = FakeManifest()
+    _fs = FakeFileSystem()
     use_case = BatchDownloadUseCase(
         sources=(source,),
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
-        manifest=FakeManifest(),
-        filesystem=FakeFileSystem(),
+        manifest=_m,
+        filesystem=_fs,
+        skip_existing=SkipExistingPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
     )
 
     result = await use_case.execute(
@@ -120,13 +138,21 @@ async def test_keep_raw_preserves_tmp_file(tmp_path: Path) -> None:
     source = FakeVideoSource()
     encoder = FakeAudioEncoder()
     progress = FakeProgressReporter()
+    _m = FakeManifest()
+    _fs = FakeFileSystem()
     use_case = BatchDownloadUseCase(
         sources=(source,),
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
-        manifest=FakeManifest(),
-        filesystem=FakeFileSystem(),
+        manifest=_m,
+        filesystem=_fs,
+        skip_existing=SkipExistingPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
     )
 
     await use_case.execute(
@@ -148,13 +174,21 @@ async def test_no_source_can_handle_url_raises(tmp_path: Path) -> None:
     source = FakeVideoSource()
     encoder = FakeAudioEncoder()
     progress = FakeProgressReporter()
+    _m = FakeManifest()
+    _fs = FakeFileSystem()
     use_case = BatchDownloadUseCase(
         sources=(source,),
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
-        manifest=FakeManifest(),
-        filesystem=FakeFileSystem(),
+        manifest=_m,
+        filesystem=_fs,
+        skip_existing=SkipExistingPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
     )
 
     result = await use_case.execute(
@@ -188,13 +222,21 @@ async def test_unexpected_exception_in_resolve_is_isolated(tmp_path: Path) -> No
     source = _ExplodingSource()
     encoder = FakeAudioEncoder()
     progress = FakeProgressReporter()
+    _m = FakeManifest()
+    _fs = FakeFileSystem()
     use_case = BatchDownloadUseCase(
         sources=(source,),
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
-        manifest=FakeManifest(),
-        filesystem=FakeFileSystem(),
+        manifest=_m,
+        filesystem=_fs,
+        skip_existing=SkipExistingPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
     )
 
     result = await use_case.execute(
@@ -224,13 +266,21 @@ async def test_name_ambiguous_raised_at_use_case_level(tmp_path: Path) -> None:
     source = FakeVideoSource()
     encoder = FakeAudioEncoder()
     progress = FakeProgressReporter()
+    _m = FakeManifest()
+    _fs = FakeFileSystem()
     use_case = BatchDownloadUseCase(
         sources=(source,),
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
-        manifest=FakeManifest(),
-        filesystem=FakeFileSystem(),
+        manifest=_m,
+        filesystem=_fs,
+        skip_existing=SkipExistingPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=_m, filesystem=_fs, output_dir=tmp_path / "downloads"
+        ),
     )
 
     with pytest.raises(NameAmbiguous, match="exactly one URL"):
@@ -265,6 +315,12 @@ async def test_atomic_write_integrity_unit_level_with_fakes(tmp_path: Path) -> N
         filename_resolver_factory=_resolver_factory,
         manifest=manifest,
         filesystem=fs,
+        skip_existing=SkipExistingPolicy(
+            manifest=manifest, filesystem=fs, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=manifest, filesystem=fs, output_dir=tmp_path / "downloads"
+        ),
     )
     result = await use_case.execute(
         BatchDownloadInput(
@@ -299,6 +355,12 @@ async def test_post_download_size_check_rejects_0_byte_raw_file(tmp_path: Path) 
         filename_resolver_factory=_resolver_factory,
         manifest=manifest,
         filesystem=fs,
+        skip_existing=SkipExistingPolicy(
+            manifest=manifest, filesystem=fs, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=manifest, filesystem=fs, output_dir=tmp_path / "downloads"
+        ),
     )
     result = await use_case.execute(
         BatchDownloadInput(
@@ -324,13 +386,20 @@ async def test_post_encode_duration_check_rejects_truncated_audio(tmp_path: Path
     source = FakeVideoSource()  # duration_s=120 by default
     encoder = FakeAudioEncoder(probe_duration_value=30.0)  # 75% short -> EncodingFailed
     manifest = FakeManifest()
+    _fs2 = FakeFileSystem()
     use_case = BatchDownloadUseCase(
         sources=(source,),
         encoder=encoder,
         progress=FakeProgressReporter(),
         filename_resolver_factory=_resolver_factory,
         manifest=manifest,
-        filesystem=FakeFileSystem(),
+        filesystem=_fs2,
+        skip_existing=SkipExistingPolicy(
+            manifest=manifest, filesystem=_fs2, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=manifest, filesystem=_fs2, output_dir=tmp_path / "downloads"
+        ),
     )
     result = await use_case.execute(
         BatchDownloadInput(
@@ -353,13 +422,21 @@ async def test_use_case_integrity_unit_level_with_fakes_pass(tmp_path: Path) -> 
     """Sprint 4 AC: 'Use case integrity -- unit-level with fakes' (within-tolerance pass)."""
     source = FakeVideoSource()  # duration_s=120
     encoder = FakeAudioEncoder(probe_duration_value=118.5)  # 1.25% short -> within 2% tolerance
+    _m5 = FakeManifest()
+    _fs5 = FakeFileSystem()
     use_case = BatchDownloadUseCase(
         sources=(source,),
         encoder=encoder,
         progress=FakeProgressReporter(),
         filename_resolver_factory=_resolver_factory,
-        manifest=FakeManifest(),
-        filesystem=FakeFileSystem(),
+        manifest=_m5,
+        filesystem=_fs5,
+        skip_existing=SkipExistingPolicy(
+            manifest=_m5, filesystem=_fs5, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=_m5, filesystem=_fs5, output_dir=tmp_path / "downloads"
+        ),
     )
     result = await use_case.execute(
         BatchDownloadInput(
@@ -378,13 +455,20 @@ async def test_failure_of_one_track_does_not_corrupt_manifest_of_others(tmp_path
     source = FakeVideoSource(fail_resolve_for=frozenset({_URL_B}))
     encoder = FakeAudioEncoder()
     manifest = FakeManifest()
+    _fs2 = FakeFileSystem()
     use_case = BatchDownloadUseCase(
         sources=(source,),
         encoder=encoder,
         progress=FakeProgressReporter(),
         filename_resolver_factory=_resolver_factory,
         manifest=manifest,
-        filesystem=FakeFileSystem(),
+        filesystem=_fs2,
+        skip_existing=SkipExistingPolicy(
+            manifest=manifest, filesystem=_fs2, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=manifest, filesystem=_fs2, output_dir=tmp_path / "downloads"
+        ),
     )
     result = await use_case.execute(
         BatchDownloadInput(
@@ -425,13 +509,20 @@ async def test_manifest_entry_preserves_original_title_separate_from_filename(
 
     source = _OriginalTitleSource()
     manifest = FakeManifest()
+    _fs3 = FakeFileSystem()
     use_case = BatchDownloadUseCase(
         sources=(source,),
         encoder=FakeAudioEncoder(probe_duration_value=120.0),
         progress=FakeProgressReporter(),
         filename_resolver_factory=_resolver_factory,
         manifest=manifest,
-        filesystem=FakeFileSystem(),
+        filesystem=_fs3,
+        skip_existing=SkipExistingPolicy(
+            manifest=manifest, filesystem=_fs3, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=manifest, filesystem=_fs3, output_dir=tmp_path / "downloads"
+        ),
     )
     await use_case.execute(
         BatchDownloadInput(

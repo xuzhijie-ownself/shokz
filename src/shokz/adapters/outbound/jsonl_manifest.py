@@ -13,8 +13,10 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from shokz.application.ports.outbound.manifest import ManifestPort
 from shokz.domain.models import FailureEntry, ManifestEntry
@@ -52,6 +54,26 @@ class JsonlManifest(ManifestPort):
     async def record_failure(self, entry: FailureEntry) -> None:
         await self._append(self._failures_path, asdict(entry))
 
+    async def find_by_track(self, source: str, track_id: str) -> ManifestEntry | None:
+        """Linear scan; returns the LAST matching entry (append-only -> latest wins).
+
+        Sprint 4.5: linear scan is fine for ~1000 entries (< 50ms). SQLite
+        backend is v2 territory.
+        """
+        latest: ManifestEntry | None = None
+        async for entry in self.iter_all():
+            if entry.source == source and entry.track_id == track_id:
+                latest = entry
+        return latest
+
+    async def iter_all(self) -> AsyncIterator[ManifestEntry]:
+        if not self._manifest_path.exists():
+            return
+        # Read in a thread to avoid blocking the event loop on large manifests.
+        rows = await asyncio.to_thread(_read_jsonl, self._manifest_path)
+        for row in rows:
+            yield ManifestEntry(**row)
+
     async def _append(self, path: Path, payload: dict[str, object]) -> None:
         async with self._lock:
             await asyncio.to_thread(_append_with_fsync, path, payload)
@@ -73,3 +95,18 @@ def _append_with_fsync(path: Path, payload: dict[str, object]) -> None:
     finally:
         os.close(dir_fd)
     _log.debug("manifest append + dual-fsync: %s (+%d bytes)", path, len(line))
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Read all rows from a JSONL file, skipping malformed lines with a log warn."""
+    rows: list[dict[str, object]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for n, raw_line in enumerate(f, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                _log.warning("skipping malformed manifest row %d in %s", n, path)
+    return rows

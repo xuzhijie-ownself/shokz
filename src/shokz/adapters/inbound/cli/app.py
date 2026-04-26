@@ -10,6 +10,7 @@ import typer
 from shokz import __version__
 from shokz.adapters.inbound.cli.commands.config_cmd import config_app
 from shokz.adapters.inbound.cli.commands.download import download_command
+from shokz.adapters.inbound.cli.commands.library_cmd import library_app
 
 app = typer.Typer(
     name="shokz",
@@ -20,6 +21,7 @@ app = typer.Typer(
 
 app.command("download")(download_command)
 app.add_typer(config_app, name="config")
+app.add_typer(library_app, name="library")
 
 
 def _version_callback(value: bool) -> None:

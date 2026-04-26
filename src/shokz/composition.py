@@ -15,7 +15,14 @@ from shokz.adapters.outbound.local_filesystem import LocalFileSystem
 from shokz.adapters.outbound.null_progress import NullProgressReporter
 from shokz.adapters.outbound.ytdlp_source import YouTubeSource
 from shokz.application.policies.filename_resolver import FilenameResolver
+from shokz.application.policies.reconciliation import ReconciliationPolicy
+from shokz.application.policies.skip_existing import SkipExistingPolicy
 from shokz.application.use_cases.batch_download import BatchDownloadUseCase
+from shokz.application.use_cases.library_query import (
+    ListLibraryUseCase,
+    ShowLibraryUseCase,
+    VerifyLibraryUseCase,
+)
 from shokz.config.schema import AppConfig
 
 
@@ -24,6 +31,9 @@ class Container:
     """Resolved use cases ready to be invoked by inbound adapters."""
 
     batch_download: BatchDownloadUseCase
+    list_library: ListLibraryUseCase
+    show_library: ShowLibraryUseCase
+    verify_library: VerifyLibraryUseCase
     config: AppConfig
 
 
@@ -46,6 +56,13 @@ def build_container(config: AppConfig) -> Container:
     def _resolver_factory(output_dir: Path) -> FilenameResolver:
         return FilenameResolver(output_dir=output_dir, template=template)
 
+    skip_existing = SkipExistingPolicy(
+        manifest=manifest, filesystem=filesystem, output_dir=output_dir
+    )
+    reconciliation = ReconciliationPolicy(
+        manifest=manifest, filesystem=filesystem, output_dir=output_dir
+    )
+
     batch_download = BatchDownloadUseCase(
         sources=sources,
         encoder=encoder,
@@ -53,5 +70,16 @@ def build_container(config: AppConfig) -> Container:
         filename_resolver_factory=_resolver_factory,
         manifest=manifest,
         filesystem=filesystem,
+        skip_existing=skip_existing,
+        reconciliation=reconciliation,
     )
-    return Container(batch_download=batch_download, config=config)
+    list_library = ListLibraryUseCase(manifest=manifest)
+    show_library = ShowLibraryUseCase(manifest=manifest)
+    verify_library = VerifyLibraryUseCase(reconciliation=reconciliation)
+    return Container(
+        batch_download=batch_download,
+        list_library=list_library,
+        show_library=show_library,
+        verify_library=verify_library,
+        config=config,
+    )

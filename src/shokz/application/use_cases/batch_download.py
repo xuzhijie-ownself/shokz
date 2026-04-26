@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import TypeAlias
 
 from shokz.application.policies.filename_resolver import FilenameResolver
+from shokz.application.policies.reconciliation import ReconciliationPolicy
+from shokz.application.policies.skip_existing import SkipDecision, SkipExistingPolicy
 from shokz.application.ports.outbound.encoder import AudioEncoderPort
 from shokz.application.ports.outbound.filesystem import FileSystemPort
 from shokz.application.ports.outbound.manifest import ManifestPort
@@ -79,6 +81,7 @@ class BatchDownloadInput:
     concurrency: int = 3
     keep_raw: bool = False
     name_override: str | None = None  # Sprint 2: --name flag for single URL
+    force: bool = False  # Sprint 4.5: bypass skip-existing
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +97,10 @@ class BatchDownloadResult:
     def failed(self) -> int:
         return sum(1 for r in self.results if r.status is TrackStatus.FAILED)
 
+    @property
+    def skipped(self) -> int:
+        return sum(1 for r in self.results if r.status is TrackStatus.SKIPPED)
+
 
 class BatchDownloadUseCase:
     """Resolve N URLs and produce N MP3s in output_dir, bounded concurrency."""
@@ -106,6 +113,8 @@ class BatchDownloadUseCase:
         filename_resolver_factory: FilenameResolverFactory,
         manifest: ManifestPort,
         filesystem: FileSystemPort,
+        skip_existing: SkipExistingPolicy,
+        reconciliation: ReconciliationPolicy,
     ) -> None:
         if not sources:
             raise ValueError("at least one VideoSourcePort required")
@@ -115,17 +124,11 @@ class BatchDownloadUseCase:
         self._resolver_factory = filename_resolver_factory
         self._manifest = manifest
         self._filesystem = filesystem
+        self._skip_existing = skip_existing
+        self._reconciliation = reconciliation
 
     async def execute(self, inp: BatchDownloadInput) -> BatchDownloadResult:
-        tmp_dir = inp.output_dir / ".tmp"
-        inp.output_dir.mkdir(parents=True, exist_ok=True)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-
-        # F6 (Sprint 2 silent-failure fix): reject symlinked output_dir.
-        # If output_dir is a symlink, an attacker (or a misconfigured user) could
-        # redirect writes outside the intended tree -- the resolver's traversal
-        # guard would not catch this because both child.resolve() and
-        # parent.resolve() collapse through the same symlink.
+        # F6: reject symlinked output_dir BEFORE any work.
         if inp.output_dir.is_symlink():
             raise NameOutsideOutputDir(
                 f"output directory {inp.output_dir} is a symlink; refusing to write through it"
@@ -134,6 +137,15 @@ class BatchDownloadUseCase:
         # Sprint 2: --name only valid with exactly one URL.
         if inp.name_override is not None and len(inp.urls) != 1:
             raise NameAmbiguous(f"--name requires exactly one URL, got {len(inp.urls)}")
+
+        tmp_dir = inp.output_dir / ".tmp"
+        inp.output_dir.mkdir(parents=True, exist_ok=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        # Sprint 4.5 review fix #4: launch reconciliation AFTER guards pass.
+        # Internal try/except in _reconcile_warn means exceptions never escape,
+        # so storing the task reference (RUF006) is purely cosmetic.
+        self._reconcile_task = asyncio.create_task(self._reconcile_warn())
 
         # Build the per-run resolver from the configured output_dir.
         resolver = self._resolver_factory(inp.output_dir)
@@ -151,6 +163,7 @@ class BatchDownloadUseCase:
                     inp.keep_raw,
                     resolver,
                     inp.name_override,
+                    inp.force,
                 )
 
         results = await asyncio.gather(*(bounded(u) for u in inp.urls))
@@ -165,6 +178,7 @@ class BatchDownloadUseCase:
         keep_raw: bool,
         resolver: FilenameResolver,
         name_override: str | None,
+        force: bool,
     ) -> TrackResult:
         started = time.monotonic()
         try:
@@ -206,6 +220,23 @@ class BatchDownloadUseCase:
 
         set_track_id(track.id)
         try:
+            # Sprint 4.5: skip-existing check (manifest + filesystem both required).
+            if not force:
+                skip_result = await self._skip_existing.check(track.source_name, track.id)
+                if skip_result.decision is SkipDecision.SKIPPED:
+                    self._progress.finish(
+                        track_id=track.id,
+                        status=TrackStatus.SKIPPED,
+                        message=str(skip_result.existing_path),
+                    )
+                    return TrackResult(
+                        track=track,
+                        status=TrackStatus.SKIPPED,
+                        final_path=skip_result.existing_path,
+                        error=None,
+                        elapsed_s=time.monotonic() - started,
+                    )
+
             self._progress.start(track_id=track.id, label=track.title)
 
             raw = await source.download_audio(track, dest_dir=tmp_dir)
@@ -319,6 +350,22 @@ class BatchDownloadUseCase:
         except Exception:
             _log.exception("failed to write failure-log entry for %s", url)
 
+    async def _reconcile_warn(self) -> None:
+        """Sprint 4.5: scan for orphan files and log a WARNING if any found."""
+        try:
+            report = await self._reconciliation.scan()
+        except Exception:
+            _log.exception("reconciliation scan failed (non-blocking)")
+            return
+        if report.orphan_files:
+            _log.warning(
+                "reconciliation: %d orphan file(s) detected in downloads/ "
+                "(no manifest entry); run `shokz library verify` for details. "
+                "Likely cause: process killed between os.replace and manifest "
+                "record (Sprint 4 SF-4 window).",
+                len(report.orphan_files),
+            )
+
     def _select_source(self, url: str) -> VideoSourcePort:
         for s in self._sources:
             if s.can_handle(url):
@@ -344,8 +391,7 @@ def _build_manifest_entry(
         rel_path = final.relative_to(output_dir).as_posix()
     except ValueError as e:
         raise ManifestInconsistent(
-            f"refusing to record manifest entry for {final}: not under "
-            f"output_dir {output_dir}"
+            f"refusing to record manifest entry for {final}: not under output_dir {output_dir}"
         ) from e
     return ManifestEntry(
         schema_version=1,
