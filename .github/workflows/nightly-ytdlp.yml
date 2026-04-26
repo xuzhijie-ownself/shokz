@@ -1,0 +1,33 @@
+name: nightly-ytdlp
+
+on:
+  schedule:
+    # Mondays at 06:00 UTC — catches yt-dlp drift weekly
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  test-against-latest-ytdlp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install deps with LATEST yt-dlp (override pin)
+        run: |
+          uv sync --all-extras
+          uv pip install --upgrade yt-dlp
+
+      - name: Run integration tests against latest yt-dlp
+        env:
+          INTEGRATION: "1"
+        run: uv run pytest -m integration -v
+        continue-on-error: false

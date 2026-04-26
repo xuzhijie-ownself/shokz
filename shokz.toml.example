@@ -1,0 +1,46 @@
+# shokz example config. Copy to ./shokz.toml or ~/.config/shokz/config.toml.
+# Every key here is optional — defaults are shown.
+# Precedence (high to low): CLI flags > SHOKZ_* env > ./shokz.toml > ~/.config/shokz/config.toml > built-in defaults.
+# Use `shokz config show` to see which file each effective value came from.
+#
+# NOTE: Sprint 0 ships only the scaffold. The TOML loader and most of these
+#       knobs land in Sprint 3 (configuration) per plan §8.
+
+[general]
+output_dir = "./downloads"        # project-local; ALL output and state lives under here
+concurrency = 3                   # parallel downloads; raise carefully — anti-throttle
+keep_raw = false                  # if true, keep the .webm/.m4a in .tmp/ after encoding
+skip_existing = true              # skip when manifest entry exists for (source, video_id)
+disk_safety_multiplier = 2.0      # require ≥ N × estimated bytes free before download
+
+[audio]
+preset = "swim-standard"          # "swim-low" (48k mono 22050) | "swim-standard" (64k mono 44100) | "swim-high" (96k mono 44100) | "custom"
+bitrate_kbps = 64                 # used only when preset = "custom" or to override
+channels = 1                      # 1 = mono (recommended for swimming) | 2 = stereo
+sample_rate_hz = 44100
+cap_to_source = true              # never encode above source bitrate (per-channel-aware)
+
+[filenames]
+template = "{title}"              # tokens: {title} {uploader} {id} {source} {duration} {date}
+collision = "suffix"              # "suffix" | "overwrite" | "skip" | "fail"
+fat_safe = true                   # FAT/exFAT-safe sanitization (unicode preserved)
+max_length = 120                  # bytes (UTF-8 aware)
+
+[sources.youtube]
+ejs_source = "ejs:github"         # required for long videos; auto-cached
+cookies_from_browser = ""         # "" | "edge" | "chrome" | "safari"
+cookies_file = ""                 # alternative to cookies_from_browser; mutually exclusive
+sleep_requests = 1.0              # politeness delay between yt-dlp requests
+
+[retry]
+max_attempts = 3
+initial_backoff_s = 2.0
+backoff_multiplier = 2.0
+jitter = true
+
+[ui]
+progress = "rich"                 # "rich" | "plain" | "json" | "none"
+
+[logging]
+level = "INFO"                    # "DEBUG" | "INFO" | "WARNING" | "ERROR"
+file = ""                         # "" = stderr only; otherwise a path

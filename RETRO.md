@@ -1,0 +1,27 @@
+# Sprint Retrospectives
+
+Append-only. One entry per sprint. Read aggregate every 3 sprints; action ONE concrete change per read.
+
+Format (per sprint):
+
+```
+## Sprint <N> — <slice name> — <YYYY-MM-DD>
+**Goal:**         <one line — should match the Sprint Goal>
+**Shipped?:**     yes / no
+**Time actual:**  <hours> / ½-day budget
+Keep:             <what worked — be specific>
+Drop:             <what wasted time>
+Try next:         <one concrete change>
+Surprise:         <unknown unknown that bit you>
+```
+
+---
+
+## Sprint 0 — Production scaffold — 2026-04-26
+**Goal:**         Empty package builds, lints, type-checks, tests, and CI green — proving the quality bar enforces itself.
+**Shipped?:**     yes
+**Time actual:**  ~½ day budget (includes plan iteration time, not just scaffold)
+Keep:             Library-first principle paid off — pathvalidate / tenacity / filelock / humanfriendly stay deferred until their slices, but the dependency list is locked, no surprises later.
+Drop:             Per-file fact-gate ceremony for trivial scaffold files; switched to bash heredoc for the batch.
+Try next:         Sprint 1 — write Gherkin AC in `docs/sprints/sprint-1.md` BEFORE any code (ATDD). Keep stories ≤ ½ day; if `download URL` end-to-end exceeds budget, split source-resolve and download into separate sprints.
+Surprise:         The plan iteration (v1 → v3.1 via two GAN rounds) consumed more time than expected, but caught the v1.0-at-Sprint-4 overpromise BEFORE building it. Net win.

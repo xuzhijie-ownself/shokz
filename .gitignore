@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Tools
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project: downloads + state are user data, never committed
+downloads/*
+!downloads/.gitkeep
+
+# Project: local config overrides
+shokz.toml
+.env
+.env.*
+
+# uv cache (lockfile IS committed; cache isn't)
+.uv-cache/
+
+# POC scratch
+poc/downloads/
+poc/downloads_raw/
+
+# Claude Code: keep the plan, ignore everything else
+.claude/*
+!.claude/plan/
+!.claude/plan/**
