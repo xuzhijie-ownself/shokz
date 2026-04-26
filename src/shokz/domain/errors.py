@@ -41,3 +41,12 @@ class NameAmbiguous(ShokzError):
 
 class NameInvalid(ShokzError):
     """The --name override (or template-rendered name) sanitizes to empty / invalid."""
+
+
+# Manifest / integrity errors (Sprint 4)
+class SourceFileCorrupt(ShokzError):
+    """yt-dlp reported success but the raw file is missing, 0-byte, or unreadable."""
+
+
+class ManifestInconsistent(ShokzError):
+    """The on-disk manifest disagrees with the actual files (Sprint 4.5 + reconciliation)."""

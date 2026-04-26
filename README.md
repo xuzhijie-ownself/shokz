@@ -36,6 +36,28 @@ shokz download --output ~/swim-mp3s URL              # custom output dir
 If two videos resolve to the same filename, the second auto-suffixes:
 `Foo.mp3` → `Foo (2).mp3` → `Foo (3).mp3` ...
 
+### Crash-safe writes + manifest (v0.4.0+)
+
+Every successful download is recorded in `downloads/.shokz/manifest.jsonl`
+(append-only JSONL, schema_version=1) with file + parent-dir fsync. Killed
+processes leave NO partial `*.mp3` in `downloads/` — only `.tmp/*.partial`
+which is auto-cleaned on the next run. Integrity checks reject:
+- yt-dlp 0-byte / truncated raw downloads (post-download size check)
+- ffmpeg silent truncation (post-encode duration probe within 2%)
+
+Failures are recorded in `downloads/.shokz/failures.jsonl` with stable
+`error_class` strings for downstream tooling.
+
+Layout:
+```
+downloads/
+├── <Video Title>.mp3
+├── .tmp/                 # in-progress (auto-cleaned)
+└── .shokz/
+    ├── manifest.jsonl    # successful tracks, fsync'd per row
+    └── failures.jsonl    # per-track failures
+```
+
 ### Configuration (v0.3.0+)
 
 `shokz` reads layered configuration from (low → high precedence):

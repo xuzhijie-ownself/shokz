@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from shokz.adapters.outbound.ffmpeg_encoder import FfmpegEncoder
+from shokz.adapters.outbound.jsonl_manifest import JsonlManifest
+from shokz.adapters.outbound.local_filesystem import LocalFileSystem
 from shokz.adapters.outbound.null_progress import NullProgressReporter
 from shokz.adapters.outbound.ytdlp_source import YouTubeSource
 from shokz.application.policies.filename_resolver import FilenameResolver
@@ -29,11 +31,18 @@ def build_container(config: AppConfig) -> Container:
     sources = (YouTubeSource(ejs_source=config.sources.youtube.ejs_source),)
     encoder = FfmpegEncoder()
     progress = NullProgressReporter()
+    filesystem = LocalFileSystem()
+
+    output_dir = config.general.output_dir
+    state_dir = output_dir / ".shokz"
+    manifest = JsonlManifest(
+        manifest_path=state_dir / "manifest.jsonl",
+        failures_path=state_dir / "failures.jsonl",
+    )
 
     template = config.filenames.template
 
     # Sprint 3: factory binds resolver to per-call output_dir + configured template.
-    # Sprint 7+ may add policy switching (overwrite | skip | fail).
     def _resolver_factory(output_dir: Path) -> FilenameResolver:
         return FilenameResolver(output_dir=output_dir, template=template)
 
@@ -42,5 +51,7 @@ def build_container(config: AppConfig) -> Container:
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
+        manifest=manifest,
+        filesystem=filesystem,
     )
     return Container(batch_download=batch_download, config=config)

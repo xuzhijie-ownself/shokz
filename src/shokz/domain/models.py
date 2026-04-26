@@ -17,9 +17,10 @@ class TrackStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Track:
-    """Resolved metadata for one source track. Sprint 1 minimal shape.
+    """Resolved metadata for one source track.
 
-    Sprint 4 extends with `source_bitrate_kbps`, `source_channels`.
+    Sprint 4: original_title preserved separately so the manifest can store
+    the unsanitized title (Sprint 2 review C12 — silent-failure-hunter F4).
     """
 
     id: str
@@ -28,6 +29,7 @@ class Track:
     duration_s: int | None
     source_url: str
     source_name: str = "youtube"
+    original_title: str | None = None  # Sprint 4: preserved unsanitized; defaults to title
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,3 +71,31 @@ class TrackResult:
     final_path: Path | None
     error: str | None
     elapsed_s: float
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestEntry:
+    """One row of downloads/.shokz/manifest.jsonl (Sprint 4, schema_version=1)."""
+
+    schema_version: int  # always 1 in Sprint 4; future migrations bump this
+    source: str
+    track_id: str
+    original_title: str
+    filename_stem: str
+    mp3_path: str  # relative to output_dir
+    bitrate_kbps: int
+    duration_s: float
+    downloaded_at: str  # ISO-8601 UTC e.g. "2026-04-27T01:23:45Z"
+
+
+@dataclass(frozen=True, slots=True)
+class FailureEntry:
+    """One row of downloads/.shokz/failures.jsonl (Sprint 4, schema_version=1)."""
+
+    schema_version: int
+    source: str | None
+    track_id: str | None
+    url: str
+    error_class: str
+    error_message: str
+    failed_at: str  # ISO-8601 UTC

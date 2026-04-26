@@ -13,7 +13,13 @@ from shokz.application.use_cases.batch_download import (
 )
 from shokz.domain.models import TrackStatus
 from shokz.domain.presets import SWIM_STANDARD
-from tests.fakes import FakeAudioEncoder, FakeProgressReporter, FakeVideoSource
+from tests.fakes import (
+    FakeAudioEncoder,
+    FakeFileSystem,
+    FakeManifest,
+    FakeProgressReporter,
+    FakeVideoSource,
+)
 
 
 def _resolver_factory(output_dir: Path) -> FilenameResolver:
@@ -36,6 +42,8 @@ async def test_use_case_orchestration_three_urls_all_succeed(tmp_path: Path) -> 
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
+        manifest=FakeManifest(),
+        filesystem=FakeFileSystem(),
     )
 
     result = await use_case.execute(
@@ -86,6 +94,8 @@ async def test_failure_is_isolated_per_track(tmp_path: Path) -> None:
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
+        manifest=FakeManifest(),
+        filesystem=FakeFileSystem(),
     )
 
     result = await use_case.execute(
@@ -115,6 +125,8 @@ async def test_keep_raw_preserves_tmp_file(tmp_path: Path) -> None:
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
+        manifest=FakeManifest(),
+        filesystem=FakeFileSystem(),
     )
 
     await use_case.execute(
@@ -141,6 +153,8 @@ async def test_no_source_can_handle_url_raises(tmp_path: Path) -> None:
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
+        manifest=FakeManifest(),
+        filesystem=FakeFileSystem(),
     )
 
     result = await use_case.execute(
@@ -179,6 +193,8 @@ async def test_unexpected_exception_in_resolve_is_isolated(tmp_path: Path) -> No
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
+        manifest=FakeManifest(),
+        filesystem=FakeFileSystem(),
     )
 
     result = await use_case.execute(
@@ -213,6 +229,8 @@ async def test_name_ambiguous_raised_at_use_case_level(tmp_path: Path) -> None:
         encoder=encoder,
         progress=progress,
         filename_resolver_factory=_resolver_factory,
+        manifest=FakeManifest(),
+        filesystem=FakeFileSystem(),
     )
 
     with pytest.raises(NameAmbiguous, match="exactly one URL"):
@@ -225,3 +243,209 @@ async def test_name_ambiguous_raised_at_use_case_level(tmp_path: Path) -> None:
                 name_override="X",
             )
         )
+
+
+# ============================================================
+# Sprint 4 use-case-level integrity + manifest tests
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_atomic_write_integrity_unit_level_with_fakes(tmp_path: Path) -> None:
+    """Sprint 4 AC: 'Atomic-write integrity (unit-level)'."""
+    source = FakeVideoSource()
+    encoder = FakeAudioEncoder(probe_duration_value=120.0)
+    progress = FakeProgressReporter()
+    manifest = FakeManifest()
+    fs = FakeFileSystem()
+    use_case = BatchDownloadUseCase(
+        sources=(source,),
+        encoder=encoder,
+        progress=progress,
+        filename_resolver_factory=_resolver_factory,
+        manifest=manifest,
+        filesystem=fs,
+    )
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A,),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    assert result.succeeded == 1
+    # FakeFileSystem records file + parent-dir fsync calls per atomic_move
+    assert len(fs.fsync_file_calls) == 1
+    assert len(fs.fsync_dir_calls) == 1
+    # Manifest got one entry
+    assert len(manifest.successes) == 1
+    entry = manifest.successes[0]
+    assert entry.schema_version == 1
+    assert entry.source == "youtube"
+
+
+@pytest.mark.asyncio
+async def test_post_download_size_check_rejects_0_byte_raw_file(tmp_path: Path) -> None:
+    """Sprint 4 AC: 'Post-download size check rejects 0-byte raw file'."""
+    source = FakeVideoSource(raw_bytes=b"")  # forces 0-byte raw -> SourceFileCorrupt
+    encoder = FakeAudioEncoder()
+    manifest = FakeManifest()
+    fs = FakeFileSystem()
+    use_case = BatchDownloadUseCase(
+        sources=(source,),
+        encoder=encoder,
+        progress=FakeProgressReporter(),
+        filename_resolver_factory=_resolver_factory,
+        manifest=manifest,
+        filesystem=fs,
+    )
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A,),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    assert result.failed == 1
+    assert "SourceFileCorrupt" not in (result.results[0].error or "")  # we expose the message
+    assert "raw download" in (result.results[0].error or "")
+    assert len(manifest.successes) == 0
+    assert len(manifest.failures) == 1
+    assert manifest.failures[0].error_class == "SOURCE_FILE_CORRUPT"
+    # Final mp3 must not exist
+    assert list((tmp_path / "downloads").glob("*.mp3")) == []
+
+
+@pytest.mark.asyncio
+async def test_post_encode_duration_check_rejects_truncated_audio(tmp_path: Path) -> None:
+    """Sprint 4 AC: 'Post-encode duration check rejects truncated audio'."""
+    source = FakeVideoSource()  # duration_s=120 by default
+    encoder = FakeAudioEncoder(probe_duration_value=30.0)  # 75% short -> EncodingFailed
+    manifest = FakeManifest()
+    use_case = BatchDownloadUseCase(
+        sources=(source,),
+        encoder=encoder,
+        progress=FakeProgressReporter(),
+        filename_resolver_factory=_resolver_factory,
+        manifest=manifest,
+        filesystem=FakeFileSystem(),
+    )
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A,),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    assert result.failed == 1
+    err = (result.results[0].error or "").lower()
+    assert "duration" in err or "deviates" in err
+    assert len(manifest.successes) == 0
+    assert len(manifest.failures) == 1
+    assert manifest.failures[0].error_class == "ENCODING_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_use_case_integrity_unit_level_with_fakes_pass(tmp_path: Path) -> None:
+    """Sprint 4 AC: 'Use case integrity -- unit-level with fakes' (within-tolerance pass)."""
+    source = FakeVideoSource()  # duration_s=120
+    encoder = FakeAudioEncoder(probe_duration_value=118.5)  # 1.25% short -> within 2% tolerance
+    use_case = BatchDownloadUseCase(
+        sources=(source,),
+        encoder=encoder,
+        progress=FakeProgressReporter(),
+        filename_resolver_factory=_resolver_factory,
+        manifest=FakeManifest(),
+        filesystem=FakeFileSystem(),
+    )
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A,),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    assert result.succeeded == 1
+
+
+@pytest.mark.asyncio
+async def test_failure_of_one_track_does_not_corrupt_manifest_of_others(tmp_path: Path) -> None:
+    """Sprint 4 AC: 'Failure of one track does not corrupt manifest of others'."""
+    source = FakeVideoSource(fail_resolve_for=frozenset({_URL_B}))
+    encoder = FakeAudioEncoder()
+    manifest = FakeManifest()
+    use_case = BatchDownloadUseCase(
+        sources=(source,),
+        encoder=encoder,
+        progress=FakeProgressReporter(),
+        filename_resolver_factory=_resolver_factory,
+        manifest=manifest,
+        filesystem=FakeFileSystem(),
+    )
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A, _URL_B, _URL_C),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=3,
+        )
+    )
+    assert result.succeeded == 2
+    assert result.failed == 1
+    # 2 manifest entries (URLs A + C), 1 failure entry (URL B)
+    assert len(manifest.successes) == 2
+    assert len(manifest.failures) == 1
+    assert manifest.failures[0].url == _URL_B
+
+
+@pytest.mark.asyncio
+async def test_manifest_entry_preserves_original_title_separate_from_filename(
+    tmp_path: Path,
+) -> None:
+    """Sprint 4 AC: 'Manifest entry preserves original_title separate from filename'."""
+
+    class _OriginalTitleSource(FakeVideoSource):
+        async def resolve(self, url: str):  # type: ignore[override]
+            self.resolve_calls.append(url)
+            from shokz.domain.models import Track
+
+            return Track(
+                id="abc123",
+                title="Soft Piano: Sleep Music!",  # what filename_resolver sanitizes
+                uploader="X",
+                duration_s=120,
+                source_url=url,
+                source_name="youtube",
+                original_title="Soft Piano: Sleep Music!",  # what manifest stores raw
+            )
+
+    source = _OriginalTitleSource()
+    manifest = FakeManifest()
+    use_case = BatchDownloadUseCase(
+        sources=(source,),
+        encoder=FakeAudioEncoder(probe_duration_value=120.0),
+        progress=FakeProgressReporter(),
+        filename_resolver_factory=_resolver_factory,
+        manifest=manifest,
+        filesystem=FakeFileSystem(),
+    )
+    await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A,),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    assert len(manifest.successes) == 1
+    entry = manifest.successes[0]
+    # Original title preserved with colons + exclamations.
+    assert entry.original_title == "Soft Piano: Sleep Music!"
+    # Filename stem is sanitized (FAT-reserved chars stripped: colons gone).
+    # pathvalidate retains `!` since it's filesystem-safe; that's correct.
+    assert ":" not in entry.filename_stem
+    assert "Soft Piano Sleep Music" in entry.filename_stem

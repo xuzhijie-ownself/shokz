@@ -46,6 +46,11 @@ sprint-review N:
 code-review PREV:
     bash scripts/code-review.sh {{PREV}}
 
+# SIGKILL a shokz download mid-encode and assert no partial *.mp3 survived
+# in the output dir. Born from Sprint 3 retro — Sprint 4 DoD ratchet.
+kill-test URL:
+    bash scripts/kill-test.sh {{URL}}
+
 # Clean caches and build artifacts
 clean:
     rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov build dist *.egg-info

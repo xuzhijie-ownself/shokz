@@ -12,22 +12,59 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeAlias
 
 from shokz.application.policies.filename_resolver import FilenameResolver
 from shokz.application.ports.outbound.encoder import AudioEncoderPort
+from shokz.application.ports.outbound.filesystem import FileSystemPort
+from shokz.application.ports.outbound.manifest import ManifestPort
 from shokz.application.ports.outbound.progress import ProgressReporterPort
 from shokz.application.ports.outbound.video_source import VideoSourcePort
-from shokz.domain.errors import NameAmbiguous, NameOutsideOutputDir, ShokzError
-from shokz.domain.models import AudioSpec, TrackResult, TrackStatus
+from shokz.domain.errors import (
+    EncodingFailed,
+    ManifestInconsistent,
+    NameAmbiguous,
+    NameOutsideOutputDir,
+    ShokzError,
+    SourceFileCorrupt,
+)
+from shokz.domain.models import (
+    AudioSpec,
+    FailureEntry,
+    ManifestEntry,
+    Track,
+    TrackResult,
+    TrackStatus,
+)
 from shokz.observability.logging import set_track_id
 
 _log = logging.getLogger("shokz.usecase.batch_download")
+
+_ERROR_CLASS_MAP: dict[str, str] = {
+    "SourceUnavailable": "SOURCE_UNAVAILABLE",
+    "DownloadFailed": "DOWNLOAD_FAILED",
+    "SourceFileCorrupt": "SOURCE_FILE_CORRUPT",
+    "EncodingFailed": "ENCODING_FAILED",
+    "FilenameCollision": "FILENAME_COLLISION",
+    "NameOutsideOutputDir": "NAME_OUTSIDE_OUTPUT_DIR",
+    "NameInvalid": "NAME_INVALID",
+    "NameAmbiguous": "NAME_AMBIGUOUS",
+    "ManifestInconsistent": "MANIFEST_INCONSISTENT",
+}
+
+
+def _stable_error_class(err: BaseException) -> str:
+    return _ERROR_CLASS_MAP.get(type(err).__name__, "UNEXPECTED_ERROR")
+
+
+# Sprint 4: integrity-check thresholds.
+MIN_RAW_BYTES: int = 1024  # below this we treat as corrupt download
+DURATION_TOLERANCE: float = 0.02  # encoded must be within 2% of source
 
 # Sprint 2: factory so each invocation gets a resolver bound to the
 # requested output_dir (which can vary per call via --output).
@@ -67,6 +104,8 @@ class BatchDownloadUseCase:
         encoder: AudioEncoderPort,
         progress: ProgressReporterPort,
         filename_resolver_factory: FilenameResolverFactory,
+        manifest: ManifestPort,
+        filesystem: FileSystemPort,
     ) -> None:
         if not sources:
             raise ValueError("at least one VideoSourcePort required")
@@ -74,6 +113,8 @@ class BatchDownloadUseCase:
         self._encoder = encoder
         self._progress = progress
         self._resolver_factory = filename_resolver_factory
+        self._manifest = manifest
+        self._filesystem = filesystem
 
     async def execute(self, inp: BatchDownloadInput) -> BatchDownloadResult:
         tmp_dir = inp.output_dir / ".tmp"
@@ -141,8 +182,9 @@ class BatchDownloadUseCase:
         try:
             track = await source.resolve(url)
         except ShokzError as e:
-            _log.warning("resolve failed: %s — %s", url, e)
+            _log.warning("resolve failed: %s -- %s", url, e)
             self._progress.finish(track_id=url, status=TrackStatus.FAILED, message=str(e))
+            await self._record_failure(url, None, None, e)
             return TrackResult(
                 track=None,
                 status=TrackStatus.FAILED,
@@ -153,6 +195,7 @@ class BatchDownloadUseCase:
         except Exception as e:  # Sprint 1 isolation; Sprint 7 narrows the taxonomy.
             _log.exception("unexpected resolve exception for %s", url)
             self._progress.finish(track_id=url, status=TrackStatus.FAILED, message=str(e))
+            await self._record_failure(url, None, None, e)
             return TrackResult(
                 track=None,
                 status=TrackStatus.FAILED,
@@ -167,31 +210,58 @@ class BatchDownloadUseCase:
 
             raw = await source.download_audio(track, dest_dir=tmp_dir)
 
+            # Sprint 4 integrity check #1: post-download size sanity.
+            # yt-dlp can exit 0 with a 0-byte / truncated raw file (silent-
+            # failure-hunter F1 from v0.2.0 plan review). Catch it BEFORE
+            # ffmpeg silently produces a 0-byte mp3.
+            if not raw.path.exists() or raw.path.stat().st_size < MIN_RAW_BYTES:
+                size = raw.path.stat().st_size if raw.path.exists() else 0
+                raise SourceFileCorrupt(
+                    f"raw download for {track.id} is {size} bytes (< {MIN_RAW_BYTES})"
+                )
+
             partial = tmp_dir / f"{track.id}.mp3.partial"
             await self._encoder.encode(raw.path, partial, spec)
 
-            # R1 (silent-failure-hunter F3 + python-reviewer Issue 1): resolve
-            # the FINAL path immediately before the atomic move, NOT before the
-            # multi-second encode. This shrinks the TOCTOU window from
-            # ~encoding-duration to ~microseconds. Sprint 8 closes it fully via
-            # a per-output-dir filelock.
+            # Sprint 4 integrity check #2: post-encode duration tolerance.
+            # NOTE (SF-6): yt-dlp duration is trusted; doesn't catch source-corrupt.
+            measured_duration_s: float = 0.0
+            if track.duration_s is not None:  # SF-2: explicit
+                measured_duration_s = await self._encoder.probe_duration(partial)
+                expected = float(track.duration_s)
+                deviation = abs(measured_duration_s - expected) / expected
+                if deviation > DURATION_TOLERANCE:
+                    raise EncodingFailed(
+                        f"encoded duration {measured_duration_s:.1f}s deviates "
+                        f"{deviation * 100:.1f}% from source {expected:.1f}s "
+                        f"(tolerance {DURATION_TOLERANCE * 100:.0f}%)"
+                    )
+
+            # Resolve the FINAL path immediately before atomic move, NOT before
+            # the multi-second encode (Sprint 2 review R1 — TOCTOU shrink).
             final = resolver.resolve(
                 track,
                 name_override=name_override,
-                exists=lambda p: p.exists(),
+                exists=self._filesystem.exists,
             )
-            if final.exists():
+            if self._filesystem.exists(final):
                 _log.warning(
-                    "race: %s appeared between resolve() and os.replace(); "
+                    "race: %s appeared between resolve() and atomic_move; "
                     "overwriting (Sprint 8 will block via filelock)",
                     final,
                 )
 
-            # Atomic move (full crash-safety + fsync comes Sprint 4).
-            os.replace(partial, final)
+            # Sprint 4 atomic protocol: os.replace + fsync(file) + fsync(dir).
+            self._filesystem.atomic_move(partial, final)
+
+            # SF-4: record manifest BEFORE removing raw.
+            # py-rev Issue 1: record measured_duration_s (actual), not source-claimed.
+            await self._manifest.record(
+                _build_manifest_entry(track, final, output_dir, spec, measured_duration_s)
+            )
 
             if not keep_raw:
-                raw.path.unlink(missing_ok=True)
+                self._filesystem.remove(raw.path)
 
             self._progress.finish(track_id=track.id, status=TrackStatus.SUCCESS)
             return TrackResult(
@@ -202,8 +272,9 @@ class BatchDownloadUseCase:
                 elapsed_s=time.monotonic() - started,
             )
         except ShokzError as e:
-            _log.warning("download/encode failed: %s — %s", track.id, e)
+            _log.warning("download/encode failed: %s -- %s", track.id, e)
             self._progress.finish(track_id=track.id, status=TrackStatus.FAILED, message=str(e))
+            await self._record_failure(track.source_url, track.source_name, track.id, e)
             return TrackResult(
                 track=track,
                 status=TrackStatus.FAILED,
@@ -214,6 +285,7 @@ class BatchDownloadUseCase:
         except Exception as e:  # Sprint 1 isolation; Sprint 7 narrows the taxonomy.
             _log.exception("unexpected download/encode exception for %s", track.id)
             self._progress.finish(track_id=track.id, status=TrackStatus.FAILED, message=str(e))
+            await self._record_failure(track.source_url, track.source_name, track.id, e)
             return TrackResult(
                 track=track,
                 status=TrackStatus.FAILED,
@@ -224,8 +296,65 @@ class BatchDownloadUseCase:
         finally:
             set_track_id(None)
 
+    async def _record_failure(
+        self,
+        url: str,
+        source_name: str | None,
+        track_id: str | None,
+        err: BaseException,
+    ) -> None:
+
+        try:
+            await self._manifest.record_failure(
+                FailureEntry(
+                    schema_version=1,
+                    source=source_name,
+                    track_id=track_id,
+                    url=url,
+                    error_class=_stable_error_class(err),
+                    error_message=str(err),
+                    failed_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+            )
+        except Exception:
+            _log.exception("failed to write failure-log entry for %s", url)
+
     def _select_source(self, url: str) -> VideoSourcePort:
         for s in self._sources:
             if s.can_handle(url):
                 return s
         raise ValueError(f"no source can handle URL: {url}")
+
+
+def encoded_duration_or(track: Track) -> float:
+    """Default to source duration when we didn't probe (e.g. duration_s was None)."""
+    return float(track.duration_s) if track.duration_s else 0.0
+
+
+def _build_manifest_entry(
+    track: Track,
+    final: Path,
+    output_dir: Path,
+    spec: AudioSpec,
+    duration_s: float,
+) -> ManifestEntry:
+
+    # SF-5: do NOT silently fall back to absolute paths.
+    try:
+        rel_path = final.relative_to(output_dir).as_posix()
+    except ValueError as e:
+        raise ManifestInconsistent(
+            f"refusing to record manifest entry for {final}: not under "
+            f"output_dir {output_dir}"
+        ) from e
+    return ManifestEntry(
+        schema_version=1,
+        source=track.source_name,
+        track_id=track.id,
+        original_title=track.original_title or track.title,
+        filename_stem=final.stem,
+        mp3_path=rel_path,
+        bitrate_kbps=spec.bitrate_kbps,
+        duration_s=duration_s,
+        downloaded_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )

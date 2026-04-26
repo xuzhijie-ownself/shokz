@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] -- 2026-04-27
+
+### Added -- Sprint 4: Manifest + atomic writes + integrity checks
+**This is the crash-safe-single-process milestone**, NOT yet v1.0.0
+(Sprint 8 = lock + signals + disk guard before v1.0).
+
+- `domain/`: `Track.original_title` (preserved unsanitized for manifest);
+  `ManifestEntry` + `FailureEntry` dataclasses (schema_version=1);
+  new errors `SourceFileCorrupt`, `ManifestInconsistent`.
+- `application/ports/outbound/`: `ManifestPort` + `FileSystemPort` Protocols.
+- `adapters/outbound/local_filesystem.py`: `LocalFileSystem` -- atomic_move
+  via os.replace + fsync(file fd) + fsync(parent dir fd). Closes the
+  kernel-write-buffer race that crash-survives os.replace.
+- `adapters/outbound/jsonl_manifest.py`: `JsonlManifest` -- append-only
+  JSONL with file fd + grandparent dir fsync chain. Single-process-safe
+  via asyncio.Lock; cross-process locking lands Sprint 8.
+- `BatchDownloadUseCase`:
+  - Pre-encode raw size check (MIN_RAW_BYTES=1024) -- catches yt-dlp 0-byte
+    silent failures (silent-failure-hunter F1 from v0.2.0 plan review).
+  - Post-encode duration probe (DURATION_TOLERANCE=0.02) -- catches ffmpeg
+    truncation (silent-failure-hunter F2 from v0.2.0 review).
+  - Atomic move via FileSystemPort, manifest record AFTER move + fsync.
+  - Records FailureEntry on any per-track failure path (incl. unexpected).
+- `composition.py`: wires JsonlManifest + LocalFileSystem (paths derived
+  from `config.general.output_dir / .shokz/`).
+- `scripts/kill-test.sh` + `just kill-test <URL>`: SIGKILL mid-encode +
+  assert no partial *.mp3 in downloads/. Sprint 4 DoD ratchet from
+  Sprint 3 retro.
+- 10 unit tests + 2 INTEGRATION acceptance tests (incl. real SIGKILL).
+
+### Code-review audit fixes (Sprint 4 review, same v0.4.0)
+Two parallel reviewers (silent-failure-hunter + python-reviewer) found
+12 substantive issues. All addressed before tag:
+
+**HIGH:**
+- **py-rev Issue 1**: probed duration was computed but discarded -- manifest
+  recorded source-claimed duration, not measured. Now records
+  measured_duration_s (the actual encoded length).
+- **SF-4**: manifest record reordered to BEFORE filesystem.remove(raw),
+  so kill between-them leaves recoverable orphan state.
+- **SF-2 / py-rev Issue 2**: `if track.duration_s:` truthy check silently
+  skipped duration_s=0. Now `is not None`.
+
+**Medium:**
+- **SF-1**: documented single-process constraint of asyncio.Lock; Sprint 8
+  will add cross-process filelock.
+- **SF-5**: removed `try/except ValueError` fallback in `_build_manifest_entry`
+  that silently wrote absolute paths; now raises ManifestInconsistent.
+- **SF-7**: parent dir mkdir + grandparent fsync moved from per-call to
+  __init__ (no race; durable from instantiation).
+- **Translation**: stable error_class strings via `_ERROR_CLASS_MAP`
+  (SOURCE_FILE_CORRUPT, ENCODING_FAILED, ...) decoupled from Python class
+  names so refactors don't break tooling. Unexpected exceptions also
+  recorded as failure entries.
+- **py-rev Issue 3**: hoisted `from datetime import datetime` to module top
+  (was deferred inline in 3 places).
+- **py-rev Issue 5**: kill-test acceptance passes `cwd=Path(__file__).parents[2]`
+  so the script's $(pwd) resolves correctly regardless of pytest invocation.
+- **SF-6**: documented that 2% tolerance validates ffmpeg-vs-yt-dlp consistency,
+  not source-vs-reality (yt-dlp can report wrong duration; that's a known limit).
+
+**Test cleanup:**
+- `tests/fakes.py`: `FakeManifest`, `FakeFileSystem`, `FakeAudioEncoder.probe_duration_value`,
+  `FakeVideoSource.raw_bytes`. Removed noqa: E402 by hoisting imports.
+
+### Verified
+- ruff check + format: clean
+- mypy --strict: clean (40 source files)
+- pytest unit: 89 passed (was 79 in v0.3.0, +10 Sprint 4 tests), 93% cov
+- INTEGRATION=1 acceptance: 23 passed in ~68s (Sprint 1: 4 + 2: 7 + 3: 10 + 4: 2)
+- just sprint-review 4: 10/10 Sprint 4 scenarios covered
+- just kill-test on a 7-hour video: PASS (no partial *.mp3 after SIGKILL)
+- Self-demo (clean state): real download produces .mp3 + manifest entry,
+  manifest schema verified ({"schema_version": 1, "source": "youtube",
+  "track_id": "jNQXAC9IVRw", "original_title": "Me at the zoo", ...,
+  "duration_s": 19.0, "downloaded_at": "2026-04-26T16:38:09Z"})
+
+### Sprint 4 deliberate scope (deferred per spec)
+- skip_existing logic                 -> Sprint 4.5 (next)
+- Reconciliation scan (orphan files)  -> Sprint 4.5
+- library list / show / verify        -> Sprint 4.5 / Sprint 9
+- Cross-process filelock              -> Sprint 8
+- Disk guard pre-check                -> Sprint 8
+- Signal handling (CancelledError)    -> Sprint 8
+- Retry policy                        -> Sprint 7
+
 ## [0.3.0] -- 2026-04-27
 
 ### Added -- Sprint 3: Configuration (TOML + env + CLI)
