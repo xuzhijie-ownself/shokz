@@ -16,6 +16,7 @@ handling, path-traversal, .mp3 suffix) live in `policies/filename_resolver.py`.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Final
 
@@ -26,9 +27,13 @@ from shokz.domain.models import Track
 DEFAULT_TEMPLATE: Final[str] = "{title}"
 DEFAULT_MAX_BYTES: Final[int] = 120
 
+# Sprint 2 supports these tokens. {date} is intentionally absent: yt-dlp's
+# upload_date metadata isn't wired into Track yet (Sprint 5).
 _SUPPORTED_TOKENS: Final[frozenset[str]] = frozenset(
-    {"title", "uploader", "id", "source", "duration", "date"}
+    {"title", "uploader", "id", "source", "duration"}
 )
+
+_log = logging.getLogger("shokz.domain.filenames")
 
 _CONTROL_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -53,6 +58,14 @@ def render_template(track: Track, template: str = DEFAULT_TEMPLATE) -> str:
         raise ValueError(
             f"unsupported template token(s): {sorted(unsupported)}; "
             f"supported: {sorted(_SUPPORTED_TOKENS)}"
+        )
+    if not track.title:
+        # Sprint 2 silent-failure fix (F5): surface unrenderable titles in logs
+        # so a buggy adapter or a genuinely-untitled video is detectable.
+        _log.warning(
+            "track id=%s has empty title; template render will produce empty stem "
+            "and the resolver will fall back to untitled-{id}",
+            track.id,
         )
     duration_str = _format_duration(track.duration_s) if track.duration_s else ""
     rendered = template.format(

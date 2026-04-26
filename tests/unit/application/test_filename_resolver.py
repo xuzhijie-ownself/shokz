@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from shokz.application.policies.filename_resolver import FilenameResolver
-from shokz.domain.errors import NameOutsideOutputDir
+from shokz.domain.errors import FilenameCollision, NameInvalid
 from shokz.domain.models import Track
 
 
@@ -80,7 +80,7 @@ def test_path_traversal_in_name_is_rejected(tmp_path: Path) -> None:
     out = resolver.resolve(track, name_override="../etc/evil", exists=lambda _p: False)
     assert out.parent.resolve() == tmp_path.resolve()
 
-    with pytest.raises(NameOutsideOutputDir):
+    with pytest.raises(NameInvalid):
         resolver.resolve(track, name_override="///", exists=lambda _p: False)
 
 
@@ -91,3 +91,12 @@ def test_empty_or_all_punctuation_title_falls_back_to_untitled_id(tmp_path: Path
         track = _track(bad_title, _id="dQw4w9WgXcQ")
         out = resolver.resolve(track, name_override=None, exists=lambda _p: False)
         assert out == tmp_path / "untitled-dQw4w9WgXcQ.mp3"
+
+
+def test_collision_exhaustion_raises_filename_collision(tmp_path: Path) -> None:
+    """Sprint 2 silent-failure fix (F1): suffix loop exhaustion raises FilenameCollision."""
+    resolver = FilenameResolver(output_dir=tmp_path)
+    track = _track("Foo")
+    # exists callback that ALWAYS returns True forces the loop to exhaust.
+    with pytest.raises(FilenameCollision, match="exhausted"):
+        resolver.resolve(track, name_override=None, exists=lambda _p: True)

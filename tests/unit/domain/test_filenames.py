@@ -79,11 +79,22 @@ def test_sanitizer_returns_empty_for_unusable_inputs(raw: str) -> None:
 
 
 def test_unicode_title_is_preserved_on_exfat_friendly_filesystem() -> None:
-    """Sprint 2 AC: 'Unicode title is preserved on exFAT-friendly filesystem'."""
-    out = sanitize_filename("10 hours music")
-    _assert_safe(out)
-    assert "10" in out
-    assert "hours" in out
+    """Sprint 2 AC: 'Unicode title is preserved on exFAT-friendly filesystem'.
+
+    python-reviewer test-quality fix: use ACTUAL unicode (was ASCII before).
+    """
+    samples = [
+        ("放松音乐", ["放松", "音乐"]),
+        ("Café Music", ["Café", "Music"]),
+        ("ピアノ夜曲", ["ピアノ", "夜曲"]),
+        ("10 hours of relaxing", ["10", "hours", "relaxing"]),
+    ]
+    for raw, must_contain in samples:
+        out = sanitize_filename(raw)
+        _assert_safe(out)
+        assert out, f"unicode input {raw!r} sanitized to empty"
+        for token in must_contain:
+            assert token in out, f"{token!r} missing from {out!r}"
 
 
 def test_sanitizer_truncates_to_max_bytes_utf8_safe() -> None:
@@ -93,8 +104,9 @@ def test_sanitizer_truncates_to_max_bytes_utf8_safe() -> None:
     assert len(out.encode("utf-8")) <= 120
 
 
-def test_sanitizer_property_every_title_produces_a_non_empty_fat_safe_stem() -> None:
-    """Sprint 2 AC: 'Sanitizer property -- every title produces a non-empty FAT-safe stem'."""
+def test_sanitizer_property_every_output_is_fat_safe_or_empty() -> None:
+    """Sprint 2 AC: every input produces output that is either empty (caller falls back
+    to untitled-{id}) OR a non-empty FAT-safe stem with no reserved name leaks."""
     samples = [
         "",
         "   ",

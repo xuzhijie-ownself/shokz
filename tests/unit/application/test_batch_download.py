@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from pathlib import Path as _Path
 
 import pytest
 
@@ -17,7 +16,7 @@ from shokz.domain.presets import SWIM_STANDARD
 from tests.fakes import FakeAudioEncoder, FakeProgressReporter, FakeVideoSource
 
 
-def _resolver_factory(output_dir: _Path) -> FilenameResolver:
+def _resolver_factory(output_dir: Path) -> FilenameResolver:
     return FilenameResolver(output_dir=output_dir)
 
 
@@ -197,3 +196,32 @@ async def test_unexpected_exception_in_resolve_is_isolated(tmp_path: Path) -> No
         assert r.status is TrackStatus.FAILED
         assert r.error is not None
         assert "BOOM" in r.error or "unexpected" in r.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_name_ambiguous_raised_at_use_case_level(tmp_path: Path) -> None:
+    """python-reviewer test-quality fix: cover BatchDownloadUseCase.execute()'s
+    NameAmbiguous guard directly (not just the CLI layer's pre-check).
+    """
+    from shokz.domain.errors import NameAmbiguous
+
+    source = FakeVideoSource()
+    encoder = FakeAudioEncoder()
+    progress = FakeProgressReporter()
+    use_case = BatchDownloadUseCase(
+        sources=(source,),
+        encoder=encoder,
+        progress=progress,
+        filename_resolver_factory=_resolver_factory,
+    )
+
+    with pytest.raises(NameAmbiguous, match="exactly one URL"):
+        await use_case.execute(
+            BatchDownloadInput(
+                urls=(_URL_A, _URL_B),  # 2 URLs + name_override -> ambiguous
+                output_dir=tmp_path / "downloads",
+                spec=SWIM_STANDARD,
+                concurrency=2,
+                name_override="X",
+            )
+        )

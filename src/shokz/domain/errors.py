@@ -37,3 +37,7 @@ class FilenameCollision(ShokzError):
 
 class NameAmbiguous(ShokzError):
     """--name was provided with multiple URLs (semantically ambiguous)."""
+
+
+class NameInvalid(ShokzError):
+    """The --name override (or template-rendered name) sanitizes to empty / invalid."""

@@ -20,7 +20,13 @@ import typer
 
 from shokz.application.use_cases.batch_download import BatchDownloadInput
 from shokz.composition import build_container
-from shokz.domain.errors import NameAmbiguous, NameOutsideOutputDir
+from shokz.domain.errors import (
+    FilenameCollision,
+    NameAmbiguous,
+    NameInvalid,
+    NameOutsideOutputDir,
+    ShokzError,
+)
 from shokz.domain.models import TrackStatus
 from shokz.domain.presets import SWIM_STANDARD
 from shokz.observability.logging import configure_logging, set_run_id
@@ -76,11 +82,31 @@ def download_command(
     try:
         result = asyncio.run(container.batch_download.execute(inp))
     except NameAmbiguous as e:
+        # User error: --name + multiple URLs. Exit 2 = invalid invocation.
+        typer.echo(f"error: {e}", err=True)
+        sys.exit(2)
+    except NameInvalid as e:
+        # User error: --name sanitizes to empty. Exit 2 = invalid invocation.
         typer.echo(f"error: {e}", err=True)
         sys.exit(2)
     except NameOutsideOutputDir as e:
+        # Security/config issue: traversal or symlinked output_dir. Exit 1.
         typer.echo(f"error: {e}", err=True)
-        sys.exit(2)
+        sys.exit(1)
+    except FilenameCollision as e:
+        # Runtime state issue: suffix loop exhausted. Exit 1.
+        typer.echo(f"error: {e}", err=True)
+        sys.exit(1)
+    except ShokzError as e:
+        # Any other domain error: clean message, exit 1.
+        typer.echo(f"error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        # F4 (Sprint 2 silent-failure fix): top-level catch-all so users see a
+        # clean message instead of a Python traceback. Sprint 7 will narrow.
+        logging.getLogger("shokz.cli").exception("unexpected error")
+        typer.echo(f"unexpected error: {e!r} (run with --log-level DEBUG for details)", err=True)
+        sys.exit(1)
 
     typer.echo(
         f"\n{result.succeeded}/{len(result.results)} succeeded "

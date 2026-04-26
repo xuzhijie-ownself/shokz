@@ -39,6 +39,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pytest test names. Catches DoD-erosion of "I'll add tests next sprint".
 - `Justfile`: `just sprint-review N` recipe added.
 
+### Code-review audit fixes (Sprint 2 review, same v0.2.0)
+Two parallel reviewers (silent-failure-hunter + python-reviewer) found 6+5
+substantive issues. All addressed before tag:
+
+- **TOCTOU shrink (HIGH):** `FilenameResolver.resolve()` is now called
+  immediately before `os.replace()`, AFTER encoding completes. The race
+  window is microseconds instead of seconds-of-encoding. Sprint 8 closes
+  it fully via filelock.
+- **Symlink rejection (HIGH):** `BatchDownloadUseCase.execute()` rejects a
+  symlinked `output_dir` upfront (would otherwise bypass `assert_within`).
+- **Error taxonomy correctness:** `--name` empty-after-sanitize raises
+  `NameInvalid` (NEW) -> CLI exit 2; suffix-loop exhaustion raises
+  `FilenameCollision` (was dead code) -> CLI exit 1. `NameOutsideOutputDir`
+  is now reserved for actual traversal/symlink events.
+- **Top-level CLI catch-all:** unexpected `Exception` translated to clean
+  stderr message + exit 1 (no tracebacks shown to swimmer).
+- **Empty-title surfacing:** `render_template` logs WARNING when the resolved
+  Track has empty title (defensive observability for buggy adapters).
+- **Cleanup:** `NameAmbiguous` and `NameOutsideOutputDir` moved to top-level
+  imports; `FilenameResolverFactory` annotated as `TypeAlias`; duplicate
+  `Path as _Path` import dropped.
+- **Hidden bug:** `{date}` removed from `_SUPPORTED_TOKENS` (was always
+  emitting "" silently); Sprint 5 will re-add when upload_date is wired.
+- **Test quality:** sanitizer-property test renamed to honest name; unicode
+  test now uses actual unicode (放松音乐, Café Music, ピアノ夜曲); new
+  use-case-level test for `NameAmbiguous` raise path.
+
 ### Verified
 - 36 unit tests + 7 CLI smoke = 43 unit passing; 84% coverage on
   `domain` + `application` + `observability`

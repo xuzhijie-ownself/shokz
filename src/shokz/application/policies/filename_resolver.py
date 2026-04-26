@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from shokz.domain.errors import NameOutsideOutputDir
+from shokz.domain.errors import FilenameCollision, NameInvalid
 from shokz.domain.filenames import (
     DEFAULT_TEMPLATE,
     fallback_stem,
@@ -37,7 +37,13 @@ class FilenameResolver:
         if name_override is not None:
             stem = sanitize_filename(name_override)
             if not stem:
-                raise NameOutsideOutputDir(f"--name {name_override!r} sanitizes to empty")
+                # F2 (silent-failure fix): user-input failure is a validation
+                # error, NOT a security/traversal one. NameInvalid maps cleanly
+                # to CLI exit 2 (invalid invocation).
+                raise NameInvalid(
+                    f"--name {name_override!r} sanitizes to empty after FAT-safety; "
+                    f"pick a name with at least one alphanumeric character"
+                )
         else:
             rendered = render_template(track, self.template)
             stem = sanitize_filename(rendered) or fallback_stem(track)
@@ -55,6 +61,8 @@ class FilenameResolver:
                 return candidate
             n += 1
             if n > 9999:
-                raise NameOutsideOutputDir(
-                    f"could not find free filename for stem {stem!r} after 9999 tries"
+                raise FilenameCollision(
+                    f"exhausted {n - 1} suffix attempts for stem {stem!r} in {self.output_dir} "
+                    "(this is almost certainly a bug or runaway state -- "
+                    "clean ./downloads/ and retry)"
                 )

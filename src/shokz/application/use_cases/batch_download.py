@@ -17,12 +17,13 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeAlias
 
 from shokz.application.policies.filename_resolver import FilenameResolver
 from shokz.application.ports.outbound.encoder import AudioEncoderPort
 from shokz.application.ports.outbound.progress import ProgressReporterPort
 from shokz.application.ports.outbound.video_source import VideoSourcePort
-from shokz.domain.errors import ShokzError
+from shokz.domain.errors import NameAmbiguous, NameOutsideOutputDir, ShokzError
 from shokz.domain.models import AudioSpec, TrackResult, TrackStatus
 from shokz.observability.logging import set_track_id
 
@@ -30,7 +31,7 @@ _log = logging.getLogger("shokz.usecase.batch_download")
 
 # Sprint 2: factory so each invocation gets a resolver bound to the
 # requested output_dir (which can vary per call via --output).
-FilenameResolverFactory = Callable[[Path], FilenameResolver]
+FilenameResolverFactory: TypeAlias = Callable[[Path], FilenameResolver]
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,10 +80,18 @@ class BatchDownloadUseCase:
         inp.output_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
+        # F6 (Sprint 2 silent-failure fix): reject symlinked output_dir.
+        # If output_dir is a symlink, an attacker (or a misconfigured user) could
+        # redirect writes outside the intended tree -- the resolver's traversal
+        # guard would not catch this because both child.resolve() and
+        # parent.resolve() collapse through the same symlink.
+        if inp.output_dir.is_symlink():
+            raise NameOutsideOutputDir(
+                f"output directory {inp.output_dir} is a symlink; refusing to write through it"
+            )
+
         # Sprint 2: --name only valid with exactly one URL.
         if inp.name_override is not None and len(inp.urls) != 1:
-            from shokz.domain.errors import NameAmbiguous
-
             raise NameAmbiguous(f"--name requires exactly one URL, got {len(inp.urls)}")
 
         # Build the per-run resolver from the configured output_dir.
@@ -158,15 +167,25 @@ class BatchDownloadUseCase:
 
             raw = await source.download_audio(track, dest_dir=tmp_dir)
 
-            # Sprint 2: title-based filename via resolver (with --name override + collision suffix).
+            partial = tmp_dir / f"{track.id}.mp3.partial"
+            await self._encoder.encode(raw.path, partial, spec)
+
+            # R1 (silent-failure-hunter F3 + python-reviewer Issue 1): resolve
+            # the FINAL path immediately before the atomic move, NOT before the
+            # multi-second encode. This shrinks the TOCTOU window from
+            # ~encoding-duration to ~microseconds. Sprint 8 closes it fully via
+            # a per-output-dir filelock.
             final = resolver.resolve(
                 track,
                 name_override=name_override,
                 exists=lambda p: p.exists(),
             )
-            partial = tmp_dir / f"{track.id}.mp3.partial"
-
-            await self._encoder.encode(raw.path, partial, spec)
+            if final.exists():
+                _log.warning(
+                    "race: %s appeared between resolve() and os.replace(); "
+                    "overwriting (Sprint 8 will block via filelock)",
+                    final,
+                )
 
             # Atomic move (full crash-safety + fsync comes Sprint 4).
             os.replace(partial, final)

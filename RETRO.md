@@ -61,3 +61,13 @@ Keep:             ATDD discipline + sprint-review tooling. Wrote sprint-2.md wit
 Drop:             Verbose Edit-tool ceremony for trivial in-place tweaks (line wraps, single-keyword changes, single-import additions). Bash heredoc for new-file batches; targeted python3 - <<PY for in-place rewrites is the right balance.
 Try next:         Sprint 3 (configuration). Land Pydantic AppConfig + TOML loader + env+CLI merge. Wire the existing hard-coded defaults (concurrency=3, SWIM_STANDARD preset, output_dir, --name) through the new config layer. Add `shokz config show/init/path` commands. Use `just sprint-review 3` to keep the ratchet in place.
 Surprise:         pathvalidate's `replacement_text="_"` silently substituted underscores for FAT-reserved chars, so an all-punctuation title became "______" not "" -- breaking the AC fallback. Caught by the unit tests written FIRST (4 reds before code change). ATDD literally saved the day for the second time this sprint.
+
+
+## Sprint 2 -- Code Review audit (closing review findings) -- 2026-04-26
+**Goal:**         Fix the 11 substantive findings from parallel adversarial reviewers (silent-failure-hunter + python-reviewer) before declaring Sprint 2 done.
+**Shipped?:**     yes (still v0.2.0; tag moved forward — safe, no remote)
+**Time actual:**  ~25 min audit + fixes (sprint-1 audit was ~30 min — getting faster)
+Keep:             Two-reviewer parallel pattern. Different angles caught different issues. The HIGH-severity TOCTOU race was identified by both — independent confirmation. Code review is now a non-skippable pre-tag step.
+Drop:             Self-claim of "DoD verified" before code review. Two sprints in a row I would have shipped real bugs without the parallel review pass. Bake `just code-review N` into Sprint 3+ DoD ratchet.
+Try next:         Sprint 3 — write `just code-review N` recipe (or include in `just sprint-review N`) that auto-dispatches the two reviewers against the diff `vN-1..HEAD`. Make code-review a CI job too if feasible.
+Surprise:         The TOCTOU bug was hiding in plain sight: I had `resolve()` BEFORE `encode()`, then `os.replace()`, with seconds of encoding in the gap. With concurrency=3 and same titles, ALL three would resolve to the same path, all encode, all overwrite. I'd have shipped this confidently if not for the review. Plan §0.5 reality-check now reads: Agile is genuinely valuable in EXACTLY FOUR ways for solo work — DoD ratchet + ATDD + per-sprint retro + adversarial code review.
