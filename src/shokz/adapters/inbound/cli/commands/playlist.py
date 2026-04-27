@@ -111,21 +111,13 @@ def playlist_command(
         sys.exit(1)
 
     # Step 3: compute target_dir (per-playlist subdir or top-level).
+    # Sprint 6 / Sprint 5 F1 follow-up: PlaylistInfo.title is already
+    # populated by ExpandPlaylistUseCase (single network call). Drop the
+    # leftover second extract_info round-trip and the bare-except fallback
+    # that silently masked unrelated errors.
     output_dir = config.general.output_dir
     target_dir: Path | None = None
     if playlist_subdir:
-        # Get a sane subdir name. We don't have the playlist title from
-        # extract_flat in our return tuple, so re-extract just the title here.
-        # For Sprint 5 simplicity: use the URL's playlist ID as fallback
-        # if title extraction fails.
-        try:
-            from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
-
-            with YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True}) as ydl:
-                info = ydl.extract_info(url, download=False) or {}
-            playlist_title = str(info.get("title") or info.get("id") or "playlist")
-        except Exception:
-            playlist_title = "playlist"
         subdir_stem = sanitize_filename(playlist_title) or "playlist"
         target_dir = output_dir / subdir_stem
 
