@@ -16,6 +16,7 @@ from typing import Any
 
 import typer
 
+from shokz.adapters.inbound.cli._summary import print_batch_summary
 from shokz.application.use_cases.batch_download import BatchDownloadInput
 from shokz.composition import build_container
 from shokz.config.loader import ConfigLoadError, load_config
@@ -28,7 +29,6 @@ from shokz.domain.errors import (
     NameOutsideOutputDir,
     ShokzError,
 )
-from shokz.domain.models import TrackStatus
 from shokz.observability.logging import configure_logging, set_run_id
 
 
@@ -168,18 +168,7 @@ def download_command(
         typer.echo(f"unexpected error: {e!r} (run with --log-level DEBUG for details)", err=True)
         sys.exit(1)
 
-    typer.echo(
-        f"\n{result.succeeded}/{len(result.results)} succeeded "
-        f"({result.skipped} skipped, {result.failed} failed) "
-        f"in {result.elapsed_s:.1f}s"
-    )
-    for r in result.results:
-        if r.status is TrackStatus.SUCCESS and r.final_path is not None:
-            typer.echo(f"  OK    {r.final_path.name}")
-        elif r.status is TrackStatus.SKIPPED and r.final_path is not None:
-            typer.echo(f"  SKIP  {r.final_path.name} (already in manifest)")
-        else:
-            typer.echo(f"  FAIL  {r.error or '(unknown)'}", err=True)
+    print_batch_summary(result, kind="batch")
 
     if result.failed > 0:
         sys.exit(1)

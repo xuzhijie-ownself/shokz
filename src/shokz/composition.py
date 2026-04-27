@@ -16,6 +16,7 @@ from shokz.adapters.outbound.null_progress import NullProgressReporter
 from shokz.adapters.outbound.ytdlp_source import YouTubeSource
 from shokz.application.policies.filename_resolver import FilenameResolver
 from shokz.application.policies.reconciliation import ReconciliationPolicy
+from shokz.application.policies.retry import RetryPolicy
 from shokz.application.policies.skip_existing import SkipExistingPolicy
 from shokz.application.use_cases.batch_download import BatchDownloadUseCase
 from shokz.application.use_cases.expand_playlist import ExpandPlaylistUseCase
@@ -65,6 +66,9 @@ def build_container(config: AppConfig) -> Container:
         manifest=manifest, filesystem=filesystem, output_dir=output_dir
     )
 
+    # Sprint 7: classified retry with per-error-class budgets.
+    retry_policy = RetryPolicy(config.retry)
+
     batch_download = BatchDownloadUseCase(
         sources=sources,
         encoder=encoder,
@@ -74,6 +78,7 @@ def build_container(config: AppConfig) -> Container:
         filesystem=filesystem,
         skip_existing=skip_existing,
         reconciliation=reconciliation,
+        retry_policy=retry_policy,
     )
     list_library = ListLibraryUseCase(manifest=manifest)
     show_library = ShowLibraryUseCase(manifest=manifest)

@@ -1,19 +1,30 @@
-"""Unit tests for BatchDownloadUseCase — Sprint 1 scenarios using fakes."""
+"""Unit tests for BatchDownloadUseCase — Sprint 1 scenarios using fakes.
+
+Sprint 7 extends with retry-policy, classification, and circuit-breaker tests.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from shokz.application.policies.filename_resolver import FilenameResolver
 from shokz.application.policies.reconciliation import ReconciliationPolicy
+from shokz.application.policies.retry import RetryPolicy
 from shokz.application.policies.skip_existing import SkipExistingPolicy
 from shokz.application.use_cases.batch_download import (
     BatchDownloadInput,
     BatchDownloadUseCase,
 )
-from shokz.domain.models import TrackStatus
+from shokz.config.schema import RetrySection
+from shokz.domain.errors import (
+    AuthRequired,
+    DownloadFailed,
+    RateLimited,
+)
+from shokz.domain.models import RawDownload, TrackStatus
 from shokz.domain.presets import SWIM_STANDARD
 from tests.fakes import (
     FakeAudioEncoder,
@@ -540,3 +551,266 @@ async def test_manifest_entry_preserves_original_title_separate_from_filename(
     # pathvalidate retains `!` since it's filesystem-safe; that's correct.
     assert ":" not in entry.filename_stem
     assert "Soft Piano Sleep Music" in entry.filename_stem
+
+
+# ============================================================
+# Sprint 7: retry policy wiring + classification + circuit breaker
+# ============================================================
+# These tests construct the use case WITH a RetryPolicy (existing tests
+# use the default None for backward compatibility).
+
+
+def _fast_retry_policy(**overrides: object) -> RetryPolicy:
+    """RetryPolicy with tiny waits so tests don't actually sleep minutes."""
+    cfg = RetrySection(backoff_base_s=0.1, **overrides)  # type: ignore[arg-type]
+    return RetryPolicy(cfg)
+
+
+@pytest.fixture(autouse=True)
+def _instant_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make retry policy's asyncio.sleep instant for every test in this file
+    (autouse so we don't have to inject it into each test's parameters)."""
+
+    async def _no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("shokz.application.policies.retry.asyncio.sleep", _no_sleep)
+
+
+class _FlakyDownloadSource(FakeVideoSource):
+    """FakeVideoSource that raises a configurable sequence on download_audio
+    before eventually succeeding (or never succeeding when failures are
+    inexhaustible)."""
+
+    download_failures: list[Exception]
+
+    def __init__(self, download_failures: list[Exception]) -> None:
+        super().__init__()
+        self.download_failures = download_failures
+
+    async def download_audio(self, track: Any, dest_dir: Any) -> RawDownload:
+        if self.download_failures:
+            self.download_calls.append(track.id)
+            raise self.download_failures.pop(0)
+        return await super().download_audio(track, dest_dir)
+
+
+def _wire(
+    source: FakeVideoSource,
+    tmp_path: Path,
+    *,
+    retry_policy: RetryPolicy | None = None,
+) -> tuple[BatchDownloadUseCase, FakeManifest]:
+    encoder = FakeAudioEncoder()
+    progress = FakeProgressReporter()
+    m = FakeManifest()
+    fs = FakeFileSystem()
+    use_case = BatchDownloadUseCase(
+        sources=(source,),
+        encoder=encoder,
+        progress=progress,
+        filename_resolver_factory=_resolver_factory,
+        manifest=m,
+        filesystem=fs,
+        skip_existing=SkipExistingPolicy(
+            manifest=m, filesystem=fs, output_dir=tmp_path / "downloads"
+        ),
+        reconciliation=ReconciliationPolicy(
+            manifest=m, filesystem=fs, output_dir=tmp_path / "downloads"
+        ),
+        retry_policy=retry_policy,
+    )
+    return use_case, m
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_retries_then_succeeds(
+    tmp_path: Path,
+) -> None:
+    """Sprint 7 Gherkin: 429 -> 429 -> success ends SUCCESS, 3 download calls."""
+    source = _FlakyDownloadSource(
+        [RateLimited("HTTP Error 429"), RateLimited("HTTP Error 429")]
+    )
+    use_case, manifest = _wire(source, tmp_path, retry_policy=_fast_retry_policy())
+
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A,),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    assert result.succeeded == 1
+    assert result.failed == 0
+    assert len(source.download_calls) == 3  # 2 failures + 1 success
+    # No failure record because the track ultimately succeeded.
+    assert len(manifest.failures) == 0
+
+
+@pytest.mark.asyncio
+async def test_auth_required_does_not_retry_and_classifies_correctly(
+    tmp_path: Path,
+) -> None:
+    """Sprint 7 GAN C2: AUTH_REQUIRED in failures.jsonl, NOT UNEXPECTED_ERROR."""
+    source = _FlakyDownloadSource([AuthRequired("Sign in to confirm your age")])
+    use_case, manifest = _wire(source, tmp_path, retry_policy=_fast_retry_policy())
+
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A,),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    assert result.failed == 1
+    assert len(source.download_calls) == 1  # NO retry
+    assert len(manifest.failures) == 1
+    assert manifest.failures[0].error_class == "AUTH_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_exhausted_rate_limited_records_classified_class_not_retry_error(
+    tmp_path: Path,
+) -> None:
+    """Sprint 7 GAN C2 / silent#1: original class survives the wrapper."""
+    source = _FlakyDownloadSource([RateLimited("HTTP Error 429")] * 10)
+    use_case, manifest = _wire(source, tmp_path, retry_policy=_fast_retry_policy())
+
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A,),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    assert result.failed == 1
+    # Default 3 retries = 4 total attempts.
+    assert len(source.download_calls) == 4
+    # ONE failure row regardless of retry count (Sprint 7 spec).
+    assert len(manifest.failures) == 1
+    # Stable error class is RATE_LIMITED, not RETRY_ERROR / UNEXPECTED_ERROR.
+    assert manifest.failures[0].error_class == "RATE_LIMITED"
+
+
+@pytest.mark.asyncio
+async def test_unclassified_download_failed_increments_counter(
+    tmp_path: Path,
+) -> None:
+    """Sprint 7 GAN U8: BatchDownloadResult.unclassified_yt_dlp_errors
+    counts terminal DownloadFailed (default fallback) tracks."""
+    source = _FlakyDownloadSource([DownloadFailed("novel error")] * 10)
+    use_case, _ = _wire(source, tmp_path, retry_policy=_fast_retry_policy())
+
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A,),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    assert result.failed == 1
+    assert result.unclassified_yt_dlp_errors == 1
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_trips_after_3_consecutive_rate_limited(
+    tmp_path: Path,
+) -> None:
+    """Sprint 7 GAN C4: 3rd consecutive RateLimited trips the breaker;
+    the 4th and 5th URLs run with retries=0 (one attempt each)."""
+    # Each URL fails terminally with RateLimited (10 failures > retry budget).
+    source = _FlakyDownloadSource([RateLimited("429")] * 50)
+    use_case, _ = _wire(source, tmp_path, retry_policy=_fast_retry_policy())
+
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A, _URL_B, _URL_C, "https://www.youtube.com/watch?v=ddddddddddd",
+                  "https://www.youtube.com/watch?v=eeeeeeeeeee"),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    assert result.failed == 5
+    assert result.rate_limit_circuit_tripped is True
+    # First 3 tracks: 4 attempts each (3 retries + 1 original) = 12.
+    # 4th and 5th tracks: 1 attempt each (breaker tripped) = 2.
+    assert len(source.download_calls) == 12 + 2
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_resets_on_intermediate_success_across_tracks(
+    tmp_path: Path,
+) -> None:
+    """Phase 4 GAN LOW#6: explicit multi-track reset coverage.
+
+    Sequence:
+      URL_A: 2 RateLimited then success on the 3rd attempt (track-level
+             retry succeeds; consecutive_rate_limits is reset by the
+             SUCCESS path, not by intra-track retry).
+      URL_B + URL_C: succeed on first attempt (counter stays at 0).
+
+    The breaker MUST NOT trip even though the batch has RateLimited
+    activity -- a track that ultimately succeeds is evidence the throttle
+    isn't sticking and `_consecutive_rate_limits` is reset to 0.
+    """
+    # 2 RateLimited (URL_A retry path) then exhaust the failure list;
+    # FakeVideoSource's super().download_audio succeeds for the rest.
+    source = _FlakyDownloadSource(
+        [RateLimited("429"), RateLimited("429")]
+    )
+    use_case, _ = _wire(source, tmp_path, retry_policy=_fast_retry_policy())
+
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A, _URL_B, _URL_C),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    # URL_A: 2 RateLimited (download_calls bumps each time) + 3rd success
+    #        path doesn't increment download_calls (FakeVideoSource's
+    #        super() call does) -> 2 + 1 = 3.
+    # URL_B + URL_C: 1 attempt each -> 2.
+    assert result.succeeded == 3
+    assert result.failed == 0
+    assert result.rate_limit_circuit_tripped is False
+
+
+@pytest.mark.asyncio
+async def test_source_file_corrupt_retry_calls_cleanup_hook(
+    tmp_path: Path,
+) -> None:
+    """Sprint 7 GAN C6: SourceFileCorrupt retry MUST delete partial files
+    before re-attempting (so yt-dlp can't resume against corrupt bytes)."""
+    # Set raw_bytes to BELOW MIN_RAW_BYTES so the size-check raises
+    # SourceFileCorrupt; on retry, FakeVideoSource produces the same
+    # bytes again -> still corrupt -> exhausts the 1 retry budget.
+    source = _FlakyDownloadSource([])
+    source.raw_bytes = b"x" * 10  # below MIN_RAW_BYTES (1024)
+    use_case, manifest = _wire(source, tmp_path, retry_policy=_fast_retry_policy())
+
+    # Pre-create a fake partial in tmp_dir so we can verify cleanup ran.
+    tmp_dir = tmp_path / "downloads" / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = tmp_dir / "aaaaaaaaaaa.partial-from-attempt-1"
+    sentinel.write_bytes(b"PARTIAL CRUFT")
+    assert sentinel.exists()
+
+    result = await use_case.execute(
+        BatchDownloadInput(
+            urls=(_URL_A,),
+            output_dir=tmp_path / "downloads",
+            spec=SWIM_STANDARD,
+            concurrency=1,
+        )
+    )
+    assert result.failed == 1  # 2 attempts both corrupt, no successes
+    assert manifest.failures[0].error_class == "SOURCE_FILE_CORRUPT"
+    # Cleanup hook should have removed the sentinel before the retry.
+    assert not sentinel.exists()

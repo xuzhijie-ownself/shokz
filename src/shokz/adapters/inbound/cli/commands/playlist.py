@@ -9,6 +9,7 @@ from pathlib import Path
 
 import typer
 
+from shokz.adapters.inbound.cli._summary import print_batch_summary
 from shokz.application.use_cases.batch_download import BatchDownloadInput
 from shokz.composition import build_container
 from shokz.config.loader import ConfigLoadError, load_config
@@ -22,7 +23,6 @@ from shokz.domain.errors import (
     SourceUnavailable,
 )
 from shokz.domain.filenames import sanitize_filename
-from shokz.domain.models import TrackStatus
 from shokz.observability.logging import configure_logging, set_run_id
 
 
@@ -166,18 +166,7 @@ def playlist_command(
         typer.echo(f"unexpected error: {e!r}", err=True)
         sys.exit(1)
 
-    typer.echo(
-        f"\n{result.succeeded}/{len(result.results)} succeeded "
-        f"({result.skipped} skipped, {result.failed} failed) "
-        f"in {result.elapsed_s:.1f}s"
-    )
-    for r in result.results:
-        if r.status is TrackStatus.SUCCESS and r.final_path is not None:
-            typer.echo(f"  OK    {r.final_path.name}")
-        elif r.status is TrackStatus.SKIPPED and r.final_path is not None:
-            typer.echo(f"  SKIP  {r.final_path.name}")
-        else:
-            typer.echo(f"  FAIL  {r.error or '(unknown)'}", err=True)
+    print_batch_summary(result, kind="playlist")
 
     if result.failed > 0:
         sys.exit(1)

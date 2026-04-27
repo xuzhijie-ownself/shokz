@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] -- 2026-04-27
+
+### Added -- Sprint 7: Classified retry + error translation
+
+- **Classified retry policy**: `application/policies/retry.py`. Per-error-class
+  attempt budgets and backoff sequences:
+  - `RateLimited` (HTTP 429): 3 retries, exponential 5s/30s/120s.
+  - `NetworkError` (HTTP 5xx, conn reset): 2 retries, 1s linear.
+  - `SourceFileCorrupt`: 1 retry with `.tmp` cleanup before re-attempt.
+  - `DownloadFailed` (default fallback): 1 retry, 1s linear.
+  - Terminal classes (`AuthRequired`, `FormatUnavailable`,
+    `SourceUnavailable`, `EncodingFailed`, etc.) get 0 retries.
+- **§7.1 error translation table**: `_classify_message()` in
+  `adapters/outbound/ytdlp_source.py` maps yt-dlp error messages to domain
+  errors via a precedence-ordered substring table (terminal-first; auth
+  beats rate-limit beats network when a message contains both). Applied at
+  THREE call sites: `resolve()`, `resolve_playlist()`, AND the
+  `download_audio()` subprocess-stderr path -- so classification fires for
+  ALL yt-dlp failures, not just metadata extraction.
+- **Resolve-phase retry**: `source.resolve(url)` now retries with the same
+  policy as `source.download_audio()`. A 429 on metadata extract is no
+  longer an immediate failure.
+- **Per-batch circuit breaker**: 3 consecutive `RateLimited` outcomes trip
+  the breaker; remaining tracks in the batch run with retries=0 to avoid
+  pathological 60-track-times-3-attempts sleep storms. Counter resets on
+  any track that succeeds.
+- **Cleanup hook**: `SourceFileCorrupt` retry deletes `tmp_dir/{track.id}.*`
+  before the next attempt so yt-dlp can't resume against a corrupt partial
+  and produce a merged-corrupt MP3 the size check would silently pass.
+- 4 NEW domain error classes in `domain/errors.py`: `AuthRequired`,
+  `FormatUnavailable`, `RateLimited` (with optional `retry_after_seconds`
+  hint), `NetworkError`.
+- `BatchDownloadResult.unclassified_yt_dlp_errors: int = 0` counter
+  surfaces §7.1 drift to the user (CLI summary line shows "N unclassified
+  yt-dlp error(s) -- please report to extend §7.1").
+- `BatchDownloadResult.rate_limit_circuit_tripped: bool = False` so the
+  CLI can explain why the rest of a batch ran without retry.
+- New `RetrySection` config (`[retry]` in `shokz.toml`) with bounded knobs:
+  `max_attempts_rate_limited`, `max_attempts_network`, `max_attempts_corrupt`
+  (all `ge=0, le=5`), `backoff_base_s` (`ge=0.1, le=60.0`),
+  `wall_clock_budget_s` (`ge=1.0, le=600.0`). All `validate_default=True`.
+- `_ERROR_CLASS_MAP` migrated from `dict[str, str]` keyed by `__name__` to
+  `tuple[tuple[type, str], ...]` matched by `isinstance` (subclass-safe).
+- Shared CLI summary printer (`adapters/inbound/cli/_summary.py`) used by
+  both `download` and `playlist` commands -- previously inline + drifting.
+
+### Changed
+
+- `BatchDownloadUseCase.__init__` accepts a NEW keyword-only
+  `retry_policy: RetryPolicy | None = None`. Default None preserves
+  no-retry behavior for tests / library callers; composition root passes
+  a real policy built from `config.retry`.
+- `download_audio()`'s subprocess-stderr handler now classifies the FULL
+  stderr blob (not just the last line) so an actionable error on line N-1
+  isn't masked by a generic advisory on line N.
+
+### Process / Retro
+
+Sprint 7 was scoped tightly to RETRY + CLASSIFICATION (master plan §8 also
+listed bitrate cap, --dry-run, and a manifest schema collapse — those
+deferred to Sprint 7.5 / Sprint 6b backlog / rejected respectively). The
+spec carried 14 GAN fixes (6 convergent C1-C6, 8 unique U1-U8) baked in
+BEFORE coding began. Each of the 6 implementation phases ended with a
+dedicated GAN review; 18 review-driven fixes landed across the sprint.
+
 ## [0.7.0] -- 2026-04-27
 
 ### Changed -- Sprint 6: Sequential by default

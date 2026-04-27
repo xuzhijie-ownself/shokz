@@ -59,3 +59,56 @@ def test_collision_policy_must_be_valid_enum() -> None:
 def test_log_level_must_match_pattern() -> None:
     with pytest.raises(ValidationError, match=r"logging|level"):
         AppConfig.model_validate({"logging": {"level": "VERBOSE"}})
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7: RetrySection defaults + bounds
+# ---------------------------------------------------------------------------
+
+
+def test_retry_defaults_match_sprint_7_spec() -> None:
+    """Sprint 7 AC: retry budgets ship with conservative defaults."""
+    cfg = AppConfig()
+    assert cfg.retry.max_attempts_rate_limited == 3
+    assert cfg.retry.max_attempts_network == 2
+    assert cfg.retry.max_attempts_corrupt == 1
+    assert cfg.retry.backoff_base_s == 1.0
+    assert cfg.retry.wall_clock_budget_s == 180.0
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["max_attempts_rate_limited", "max_attempts_network", "max_attempts_corrupt"],
+)
+def test_retry_max_attempts_capped_at_5(field: str) -> None:
+    """Sprint 7 GAN U5: cap retries at 5 so a TOML can't turn a 60-track
+    playlist into a 60-hour wait. Parameterized so a future le=50 typo on
+    one field is caught."""
+    with pytest.raises(ValidationError, match=field):
+        AppConfig.model_validate({"retry": {field: 99}})
+
+
+def test_retry_wall_clock_budget_capped_at_600s() -> None:
+    """Sprint 7 GAN U5: per-track wall-clock budget ceiling 600s."""
+    with pytest.raises(ValidationError, match="wall_clock_budget_s"):
+        AppConfig.model_validate({"retry": {"wall_clock_budget_s": 86400.0}})
+
+
+def test_retry_wall_clock_budget_lower_bound_1s() -> None:
+    """Sprint 7 GAN U5: wall-clock budget can't be less than 1s
+    (otherwise even the first attempt would race the budget)."""
+    with pytest.raises(ValidationError, match="wall_clock_budget_s"):
+        AppConfig.model_validate({"retry": {"wall_clock_budget_s": 0.5}})
+
+
+def test_retry_backoff_base_must_be_positive() -> None:
+    """Sprint 7 GAN U5: backoff_base_s ge=0.1 prevents busy-loop retry."""
+    with pytest.raises(ValidationError, match="backoff_base_s"):
+        AppConfig.model_validate({"retry": {"backoff_base_s": 0.0}})
+
+
+def test_retry_backoff_base_capped_at_60s() -> None:
+    """Sprint 7 GAN U5 (review-pass extension): le=60.0 prevents an
+    accidentally-huge base from turning a small batch into an hours-long stall."""
+    with pytest.raises(ValidationError, match="backoff_base_s"):
+        AppConfig.model_validate({"retry": {"backoff_base_s": 61.0}})

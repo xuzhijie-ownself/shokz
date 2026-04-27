@@ -13,14 +13,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeAlias
+from typing import TypeAlias, TypeVar
 
 from shokz.application.policies.filename_resolver import FilenameResolver
 from shokz.application.policies.reconciliation import ReconciliationPolicy
+from shokz.application.policies.retry import RetryPolicy
 from shokz.application.policies.skip_existing import SkipDecision, SkipExistingPolicy
 from shokz.application.ports.outbound.encoder import AudioEncoderPort
 from shokz.application.ports.outbound.filesystem import FileSystemPort
@@ -28,40 +29,67 @@ from shokz.application.ports.outbound.manifest import ManifestPort
 from shokz.application.ports.outbound.progress import ProgressReporterPort
 from shokz.application.ports.outbound.video_source import VideoSourcePort
 from shokz.domain.errors import (
+    AuthRequired,
+    DownloadFailed,
     EncodingFailed,
+    FormatUnavailable,
     ManifestInconsistent,
     NameAmbiguous,
+    NameInvalid,
     NameOutsideOutputDir,
+    NetworkError,
+    RateLimited,
     ShokzError,
     SourceFileCorrupt,
+    SourceUnavailable,
 )
 from shokz.domain.models import (
     AudioSpec,
     FailureEntry,
     ManifestEntry,
+    RawDownload,
     Track,
     TrackResult,
     TrackStatus,
 )
 from shokz.observability.logging import set_track_id
 
+_T = TypeVar("_T")
+
 _log = logging.getLogger("shokz.usecase.batch_download")
 
-_ERROR_CLASS_MAP: dict[str, str] = {
-    "SourceUnavailable": "SOURCE_UNAVAILABLE",
-    "DownloadFailed": "DOWNLOAD_FAILED",
-    "SourceFileCorrupt": "SOURCE_FILE_CORRUPT",
-    "EncodingFailed": "ENCODING_FAILED",
-    "FilenameCollision": "FILENAME_COLLISION",
-    "NameOutsideOutputDir": "NAME_OUTSIDE_OUTPUT_DIR",
-    "NameInvalid": "NAME_INVALID",
-    "NameAmbiguous": "NAME_AMBIGUOUS",
-    "ManifestInconsistent": "MANIFEST_INCONSISTENT",
-}
+# Sprint 7 GAN U4: was a `dict[str, str]` keyed on `type(err).__name__` --
+# subclass-fragile (a future class subclassing RateLimited would miss the
+# map and land as "UNEXPECTED_ERROR"). Now ordered tuple matched via
+# isinstance, most-specific-first.
+_ERROR_CLASS_MAP: tuple[tuple[type[BaseException], str], ...] = (
+    # Sprint 7 classified source/network errors (most specific first)
+    (AuthRequired, "AUTH_REQUIRED"),
+    (FormatUnavailable, "FORMAT_UNAVAILABLE"),
+    (RateLimited, "RATE_LIMITED"),
+    (NetworkError, "NETWORK_ERROR"),
+    # Pre-Sprint-7 taxonomy
+    (SourceUnavailable, "SOURCE_UNAVAILABLE"),
+    (SourceFileCorrupt, "SOURCE_FILE_CORRUPT"),
+    (EncodingFailed, "ENCODING_FAILED"),
+    (NameOutsideOutputDir, "NAME_OUTSIDE_OUTPUT_DIR"),
+    (NameInvalid, "NAME_INVALID"),
+    (NameAmbiguous, "NAME_AMBIGUOUS"),
+    (ManifestInconsistent, "MANIFEST_INCONSISTENT"),
+    # DownloadFailed is the catch-all default for ShokzError-typed errors
+    # we couldn't classify more specifically; MUST come LAST so subclasses
+    # of DownloadFailed (none today, future-proof) classify first.
+    (DownloadFailed, "DOWNLOAD_FAILED"),
+)
 
 
 def _stable_error_class(err: BaseException) -> str:
-    return _ERROR_CLASS_MAP.get(type(err).__name__, "UNEXPECTED_ERROR")
+    """Return a stable error_class string for failures.jsonl, classifying
+    by isinstance (Sprint 7 GAN U4 -- subclass-safe)."""
+    for exc_class, label in _ERROR_CLASS_MAP:
+        if isinstance(err, exc_class):
+            return label
+    return "UNEXPECTED_ERROR"
 
 
 # Sprint 4: integrity-check thresholds.
@@ -89,6 +117,15 @@ class BatchDownloadInput:
 class BatchDownloadResult:
     results: tuple[TrackResult, ...]
     elapsed_s: float
+    # Sprint 7 GAN U8: counts yt-dlp errors that fell through to
+    # DownloadFailed (no §7.1 pattern matched). Surfaced in the CLI
+    # summary line so users know to report novel error shapes for
+    # the §7.1 table to grow.
+    unclassified_yt_dlp_errors: int = 0
+    # Sprint 7 GAN C4: True when the per-batch RateLimited circuit
+    # breaker tripped (3 consecutive RateLimited tracks); the rest of
+    # the batch downgraded to no-retry to avoid hours of pointless waits.
+    rate_limit_circuit_tripped: bool = False
 
     @property
     def succeeded(self) -> int:
@@ -116,6 +153,8 @@ class BatchDownloadUseCase:
         filesystem: FileSystemPort,
         skip_existing: SkipExistingPolicy,
         reconciliation: ReconciliationPolicy,
+        *,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         if not sources:
             raise ValueError("at least one VideoSourcePort required")
@@ -127,6 +166,9 @@ class BatchDownloadUseCase:
         self._filesystem = filesystem
         self._skip_existing = skip_existing
         self._reconciliation = reconciliation
+        # Sprint 7: optional ISP retry policy. None = no retry (existing
+        # tests / library callers green by default).
+        self._retry_policy = retry_policy
 
     async def execute(self, inp: BatchDownloadInput) -> BatchDownloadResult:
         # F6: reject symlinked output_dir BEFORE any work.
@@ -175,6 +217,13 @@ class BatchDownloadUseCase:
         sem = asyncio.Semaphore(inp.concurrency)
         started = time.monotonic()
 
+        # Sprint 7 GAN C4: per-batch circuit breaker + GAN U8: counter.
+        # These are mutated from inside _process_one via instance attributes
+        # so they survive across the gather. They reset per execute() call.
+        self._consecutive_rate_limits = 0
+        self._unclassified_yt_dlp_errors = 0
+        self._circuit_tripped = False
+
         async def bounded(url: str) -> TrackResult:
             async with sem:
                 return await self._process_one(
@@ -190,7 +239,12 @@ class BatchDownloadUseCase:
                 )
 
         results = await asyncio.gather(*(bounded(u) for u in inp.urls))
-        return BatchDownloadResult(results=tuple(results), elapsed_s=time.monotonic() - started)
+        return BatchDownloadResult(
+            results=tuple(results),
+            elapsed_s=time.monotonic() - started,
+            unclassified_yt_dlp_errors=self._unclassified_yt_dlp_errors,
+            rate_limit_circuit_tripped=self._circuit_tripped,
+        )
 
     async def _process_one(
         self,
@@ -218,9 +272,17 @@ class BatchDownloadUseCase:
                 elapsed_s=time.monotonic() - started,
             )
         try:
-            track = await source.resolve(url)
+            # Sprint 7 C3: wrap resolve in RetryPolicy. Retry-class
+            # classification happens at adapter via _classify_message;
+            # a RateLimited or NetworkError on metadata extract retries
+            # exactly the same way as on download.
+            async def _do_resolve() -> Track:
+                return await source.resolve(url)
+
+            track = await self._maybe_retry(_do_resolve)
         except ShokzError as e:
             _log.warning("resolve failed: %s -- %s", url, e)
+            self._update_circuit_state(e)
             self._progress.finish(track_id=url, status=TrackStatus.FAILED, message=str(e))
             await self._record_failure(url, None, None, e)
             return TrackResult(
@@ -232,6 +294,10 @@ class BatchDownloadUseCase:
             )
         except Exception as e:  # Sprint 1 isolation; Sprint 7 narrows the taxonomy.
             _log.exception("unexpected resolve exception for %s", url)
+            # Phase 4 GAN HIGH#4: unexpected non-ShokzError = adapter bug,
+            # NOT rate-limit pressure. Reset the counter so a sequence of
+            # RateLimited + adapter-bug + RateLimited doesn't trip the breaker.
+            self._consecutive_rate_limits = 0
             self._progress.finish(track_id=url, status=TrackStatus.FAILED, message=str(e))
             await self._record_failure(url, None, None, e)
             return TrackResult(
@@ -263,17 +329,50 @@ class BatchDownloadUseCase:
 
             self._progress.start(track_id=track.id, label=track.title)
 
-            raw = await source.download_audio(track, dest_dir=tmp_dir)
+            # Sprint 7 C3 + C6: wrap download + size-check (the retry unit
+            # per spec U1) in RetryPolicy. on_retry cleans up partial bytes
+            # so yt-dlp doesn't resume against a corrupt .webm and produce
+            # a merged-corrupt MP3 the size check would silently pass.
+            async def _do_download() -> RawDownload:
+                downloaded = await source.download_audio(track, dest_dir=tmp_dir)
+                # Integrity check #1 inside the retry unit: a 0-byte raw is
+                # a SourceFileCorrupt that DOES retry (with cleanup).
+                if (
+                    not downloaded.path.exists()
+                    or downloaded.path.stat().st_size < MIN_RAW_BYTES
+                ):
+                    size = (
+                        downloaded.path.stat().st_size
+                        if downloaded.path.exists()
+                        else 0
+                    )
+                    raise SourceFileCorrupt(
+                        f"raw download for {track.id} is {size} bytes "
+                        f"(< {MIN_RAW_BYTES})"
+                    )
+                return downloaded
 
-            # Sprint 4 integrity check #1: post-download size sanity.
-            # yt-dlp can exit 0 with a 0-byte / truncated raw file (silent-
-            # failure-hunter F1 from v0.2.0 plan review). Catch it BEFORE
-            # ffmpeg silently produces a 0-byte mp3.
-            if not raw.path.exists() or raw.path.stat().st_size < MIN_RAW_BYTES:
-                size = raw.path.stat().st_size if raw.path.exists() else 0
-                raise SourceFileCorrupt(
-                    f"raw download for {track.id} is {size} bytes (< {MIN_RAW_BYTES})"
-                )
+            async def _cleanup_partial(
+                _err: BaseException, _attempt: int
+            ) -> None:
+                """Sprint 7 C6: delete any tmp_dir/{track.id}.* before the
+                next retry attempt so yt-dlp can't resume against the
+                partial / corrupt file. Phase 4 GAN MED#3: log on
+                OSError so cleanup failures don't silently masquerade as
+                downstream SourceFileCorrupt."""
+                for p in tmp_dir.glob(f"{track.id}.*"):
+                    try:
+                        p.unlink()
+                    except OSError as exc:
+                        _log.warning(
+                            "cleanup_partial: could not delete %s for retry: %s",
+                            p,
+                            exc,
+                        )
+
+            raw = await self._maybe_retry(
+                _do_download, on_retry=_cleanup_partial
+            )
 
             partial = tmp_dir / f"{track.id}.mp3.partial"
             await self._encoder.encode(raw.path, partial, spec)
@@ -318,6 +417,10 @@ class BatchDownloadUseCase:
             if not keep_raw:
                 self._filesystem.remove(raw.path)
 
+            # Sprint 7 GAN C4 circuit breaker: any SUCCESS resets the
+            # consecutive-RateLimited counter (one good run means we
+            # haven't actually been throttled out of the network).
+            self._consecutive_rate_limits = 0
             self._progress.finish(track_id=track.id, status=TrackStatus.SUCCESS)
             return TrackResult(
                 track=track,
@@ -328,6 +431,7 @@ class BatchDownloadUseCase:
             )
         except ShokzError as e:
             _log.warning("download/encode failed: %s -- %s", track.id, e)
+            self._update_circuit_state(e)
             self._progress.finish(track_id=track.id, status=TrackStatus.FAILED, message=str(e))
             await self._record_failure(track.source_url, track.source_name, track.id, e)
             return TrackResult(
@@ -339,6 +443,8 @@ class BatchDownloadUseCase:
             )
         except Exception as e:  # Sprint 1 isolation; Sprint 7 narrows the taxonomy.
             _log.exception("unexpected download/encode exception for %s", track.id)
+            # Phase 4 GAN HIGH#4 (download path): same rationale as resolve.
+            self._consecutive_rate_limits = 0
             self._progress.finish(track_id=track.id, status=TrackStatus.FAILED, message=str(e))
             await self._record_failure(track.source_url, track.source_name, track.id, e)
             return TrackResult(
@@ -395,6 +501,62 @@ class BatchDownloadUseCase:
             if s.can_handle(url):
                 return s
         raise ValueError(f"no source can handle URL: {url}")
+
+    async def _maybe_retry(
+        self,
+        coro_factory: Callable[[], Awaitable[_T]],
+        on_retry: Callable[[BaseException, int], Awaitable[None]] | None = None,
+    ) -> _T:
+        """Sprint 7: route through RetryPolicy if non-None AND the per-batch
+        circuit breaker hasn't tripped. Otherwise call coro_factory once
+        (preserves no-retry behavior for tests / library callers and for
+        the rest of a batch after the breaker fires).
+
+        Phase 6 GAN MED#4: parameterised with TypeVar so call sites get
+        proper static typing (track: Track, raw: RawDownload) instead of
+        an Any silently escaping through both branches.
+        """
+        if self._retry_policy is None or self._circuit_tripped:
+            return await coro_factory()
+        return await self._retry_policy.run(coro_factory, on_retry=on_retry)
+
+    def _update_circuit_state(self, err: BaseException) -> None:
+        """Sprint 7 GAN C4 + U8: track per-batch state on each FAILED track.
+
+        - Consecutive RateLimited counter (any non-RateLimited resets it);
+          trip the circuit at 3 to disable retries for the rest of the
+          batch (avoids a 60-track playlist becoming a 3-hour wait).
+        - Unclassified DownloadFailed counter (U8) so the CLI summary can
+          surface §7.1 drift to the user.
+
+        Sprint 7 Phase 6 GAN HIGH#2 disclaimer: with `--concurrency > 1`
+        (cap is 4), multiple `_process_one` coroutines update these
+        counters concurrently. asyncio is single-threaded and this method
+        contains no `await`, so each individual `_update_circuit_state`
+        call is atomic from asyncio's perspective. However, the SUCCESS-
+        path reset and FAILURE-path increment can interleave at scheduling
+        boundaries between coroutines. The breaker may trip slightly
+        earlier or later than a strict consecutive count would predict.
+        Sprint 6 default is `concurrency = 1` (no concurrency, exact
+        semantics). For higher concurrency, treat the breaker as
+        "best-effort: trips when consecutive RateLimited pressure is
+        sustained, not on a strict count of 3."
+        """
+        if isinstance(err, RateLimited):
+            self._consecutive_rate_limits += 1
+            if self._consecutive_rate_limits >= 3 and not self._circuit_tripped:
+                self._circuit_tripped = True
+                _log.warning(
+                    "rate-limit circuit breaker tripped: 3 consecutive "
+                    "RateLimited tracks; remaining tracks in this batch "
+                    "will run with retries=0 (waited a long time for nothing)"
+                )
+        else:
+            self._consecutive_rate_limits = 0
+        # U8: count only EXACT DownloadFailed (not subclasses) so we don't
+        # double-count classified errors that happen to inherit from it.
+        if type(err) is DownloadFailed:
+            self._unclassified_yt_dlp_errors += 1
 
 
 def encoded_duration_or(track: Track) -> float:

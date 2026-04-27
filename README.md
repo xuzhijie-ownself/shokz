@@ -38,6 +38,20 @@ If two videos resolve to the same filename, the second auto-suffixes:
 
 **Sequential by default (v0.7.0+)**: a bare `shokz download URL_A URL_B URL_C` processes URLs strictly in order. Pass `-c 4` (cap is 4) to enable in-process concurrency. **Do NOT** spawn multiple `shokz` processes against the same `--output` directory; the manifest layer is single-process-safe only until Sprint 8 lands cross-process file locking.
 
+**Classified retry (v0.8.0+)**: transient YouTube failures auto-retry with sensible backoff:
+
+| Class | Trigger (yt-dlp message contains) | Retries | Backoff |
+|---|---|---|---|
+| `RateLimited` | `HTTP Error 429`, `too many requests` | 3 | 5s, 30s, 120s |
+| `NetworkError` | `HTTP Error 5xx`, `connection reset/refused`, DNS, timeout | 2 | 1s linear |
+| `SourceFileCorrupt` | post-download size < 1 KB | 1 | 1s |
+| `DownloadFailed` (default) | unrecognized | 1 | 1s |
+| `AuthRequired` | `Sign in to confirm`, `not available in your country`, members-only | **0** (terminal) | — |
+| `FormatUnavailable` | `Requested format not available` | **0** (terminal) | — |
+| `SourceUnavailable` | `Private video`, `Video unavailable`, `removed`, premiere/live | **0** (terminal) | — |
+
+After 3 consecutive `RateLimited` outcomes the per-batch circuit breaker trips and the rest of the run skips retries (avoids 60-track playlists turning into 3-hour waits on a bad day). Retry budgets are configurable via `[retry]` in `shokz.toml`.
+
 ### Playlists (v0.6.0+)
 
 ```bash

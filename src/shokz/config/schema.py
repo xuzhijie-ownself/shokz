@@ -67,6 +67,27 @@ class LoggingConfig(BaseModel):
     level: str = Field(default="INFO", pattern=r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$")
 
 
+class RetrySection(BaseModel):
+    """Sprint 7: classified retry policy budgets.
+
+    All bounds enforced (Sprint 7 GAN U5 / architect#7) so a TOML with
+    `max_attempts_rate_limited = 999` can't quietly turn a 60-track playlist
+    into a 60-hour wait. validate_default=True so an invalid default fails
+    fast at config load instead of at first access.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    max_attempts_rate_limited: int = Field(default=3, ge=0, le=5)
+    max_attempts_network: int = Field(default=2, ge=0, le=5)
+    max_attempts_corrupt: int = Field(default=1, ge=0, le=5)
+    backoff_base_s: float = Field(default=1.0, ge=0.1, le=60.0)
+    # Per-track wall-clock cap. Covers download time + sleeps (NOT just
+    # sleeps; Sprint 7 GAN C4 / silent#5). Worst-case RateLimited budget:
+    # 5 + 30 + 120 = 155s of sleep + a few seconds work fits.
+    wall_clock_budget_s: float = Field(default=180.0, ge=1.0, le=600.0)
+
+
 class AppConfig(BaseModel):
     """Top-level config. Frozen so accidental mutation is rejected.
 
@@ -82,6 +103,7 @@ class AppConfig(BaseModel):
     filenames: FilenamesConfig = Field(default_factory=FilenamesConfig)
     sources: SourcesConfig = Field(default_factory=SourcesConfig)
     logging_: LoggingConfig = Field(default_factory=LoggingConfig, alias="logging")
+    retry: RetrySection = Field(default_factory=RetrySection)
 
     @model_validator(mode="after")
     def _custom_preset_requires_explicit_bitrate(self) -> AppConfig:
