@@ -15,13 +15,16 @@ def _write(path: Path, text: str) -> None:
 
 
 def test_built_in_defaults_apply_when_no_config_file_exists(tmp_path: Path) -> None:
-    """Sprint 3 AC: 'Built-in defaults apply when no config file exists'."""
+    """Sprint 3 AC: 'Built-in defaults apply when no config file exists'.
+
+    Sprint 6: built-in concurrency default lowered 3 -> 1.
+    """
     loaded = load_config(
         user_toml=tmp_path / "no-such-user.toml",
         project_toml=tmp_path / "no-such-project.toml",
         env={},
     )
-    assert loaded.config.general.concurrency == 3
+    assert loaded.config.general.concurrency == 1
     assert loaded.config.audio.preset.value == "swim-standard"
     assert loaded.sources["general.concurrency"] == "built-in"
     assert loaded.loaded_files == ()
@@ -30,42 +33,45 @@ def test_built_in_defaults_apply_when_no_config_file_exists(tmp_path: Path) -> N
 
 
 def test_project_local_shokz_toml_overrides_built_in_defaults(tmp_path: Path) -> None:
-    """Sprint 3 AC: 'Project-local shokz.toml overrides built-in defaults'."""
+    """Sprint 3 AC: 'Project-local shokz.toml overrides built-in defaults'.
+
+    Sprint 6: concurrency cap lowered 16 -> 4; using values 1..4.
+    """
     project = tmp_path / "shokz.toml"
-    _write(project, "[general]\nconcurrency = 5\n")
+    _write(project, "[general]\nconcurrency = 4\n")
 
     loaded = load_config(
         user_toml=tmp_path / "no-user.toml",
         project_toml=project,
         env={},
     )
-    assert loaded.config.general.concurrency == 5
+    assert loaded.config.general.concurrency == 4
     assert loaded.sources["general.concurrency"] == str(project)
 
 
 def test_env_var_overrides_project_toml(tmp_path: Path) -> None:
     """Sprint 3 AC: 'Env var overrides project TOML'."""
     project = tmp_path / "shokz.toml"
-    _write(project, "[general]\nconcurrency = 5\n")
+    _write(project, "[general]\nconcurrency = 2\n")
 
     loaded = load_config(
         user_toml=tmp_path / "no-user.toml",
         project_toml=project,
-        env={"SHOKZ_GENERAL__CONCURRENCY": "7"},
+        env={"SHOKZ_GENERAL__CONCURRENCY": "3"},
     )
-    assert loaded.config.general.concurrency == 7
+    assert loaded.config.general.concurrency == 3
     assert "env SHOKZ_GENERAL__CONCURRENCY" in loaded.sources["general.concurrency"]
 
 
 def test_cli_flag_overrides_env_var(tmp_path: Path) -> None:
     """Sprint 3 AC: 'CLI flag overrides env var'."""
     loaded = load_config(
-        cli_overrides={"general.concurrency": 9},
+        cli_overrides={"general.concurrency": 4},
         user_toml=tmp_path / "no-user.toml",
         project_toml=tmp_path / "no-project.toml",
-        env={"SHOKZ_GENERAL__CONCURRENCY": "7"},
+        env={"SHOKZ_GENERAL__CONCURRENCY": "3"},
     )
-    assert loaded.config.general.concurrency == 9
+    assert loaded.config.general.concurrency == 4
     assert loaded.sources["general.concurrency"] == "CLI"
 
 
@@ -74,23 +80,26 @@ def test_config_precedence_unit_level(tmp_path: Path) -> None:
 
     Stack a value across all 4 layers, assert top-most (CLI) wins and
     source-tracking dict reports the right origin for each key.
+
+    Sprint 6: cap is now 4; layer values are 1 < 2 < 3 < 4 (built-in <
+    user < project < env < CLI ordering covered by the source asserts).
     """
     user = tmp_path / "user.toml"
     project = tmp_path / "project.toml"
     _write(user, "[general]\nconcurrency = 2\n")
-    _write(project, "[general]\nconcurrency = 5\n")
+    _write(project, "[general]\nconcurrency = 3\n")
 
     loaded = load_config(
-        cli_overrides={"general.concurrency": 9},
+        cli_overrides={"general.concurrency": 4},
         user_toml=user,
         project_toml=project,
-        env={"SHOKZ_GENERAL__CONCURRENCY": "7"},
+        env={"SHOKZ_GENERAL__CONCURRENCY": "3"},
     )
-    assert loaded.config.general.concurrency == 9
+    assert loaded.config.general.concurrency == 4
     assert loaded.sources["general.concurrency"] == "CLI"
 
     # A key set ONLY in TOML still records the TOML source.
-    _write(project, '[general]\nconcurrency = 5\n[audio]\npreset = "swim-low"\n')
+    _write(project, '[general]\nconcurrency = 3\n[audio]\npreset = "swim-low"\n')
     loaded2 = load_config(
         user_toml=tmp_path / "no-user.toml",
         project_toml=project,

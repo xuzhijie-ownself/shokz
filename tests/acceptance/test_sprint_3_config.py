@@ -42,35 +42,35 @@ def _shokz(
 
 
 def test_built_in_defaults_apply_when_no_config_file_exists(tmp_path: Path) -> None:
-    """Sprint 3 AC scenario."""
+    """Sprint 3 AC scenario; Sprint 6: default concurrency lowered 3 -> 1."""
     # Run from a clean cwd (no shokz.toml) and an env stripped of SHOKZ_*.
     clean_env = _clean_env(tmp_path)
     res = _shokz("config", "show", cwd=tmp_path, env=clean_env)
     assert res.returncode == 0, res.stderr
     out = res.stdout
-    assert "general.concurrency = 3" in out
+    assert "general.concurrency = 1" in out
     assert "built-in" in out
     assert "audio.preset = <AudioPreset.SWIM_STANDARD" in out or "swim-standard" in out
     assert "filenames.template = '{title}'" in out
 
 
 def test_project_local_shokz_toml_overrides_built_in_defaults(tmp_path: Path) -> None:
-    """Sprint 3 AC scenario."""
-    (tmp_path / "shokz.toml").write_text("[general]\nconcurrency = 5\n")
+    """Sprint 3 AC scenario; Sprint 6: cap lowered 16 -> 4."""
+    (tmp_path / "shokz.toml").write_text("[general]\nconcurrency = 4\n")
     clean_env = _clean_env(tmp_path)
     res = _shokz("config", "show", cwd=tmp_path, env=clean_env)
     assert res.returncode == 0, res.stderr
-    assert "general.concurrency = 5" in res.stdout
+    assert "general.concurrency = 4" in res.stdout
     assert "shokz.toml" in res.stdout
 
 
 def test_env_var_overrides_project_toml(tmp_path: Path) -> None:
     """Sprint 3 AC scenario."""
-    (tmp_path / "shokz.toml").write_text("[general]\nconcurrency = 5\n")
-    env = {**os.environ, "SHOKZ_GENERAL__CONCURRENCY": "7"}
+    (tmp_path / "shokz.toml").write_text("[general]\nconcurrency = 2\n")
+    env = {**os.environ, "SHOKZ_GENERAL__CONCURRENCY": "3"}
     res = _shokz("config", "show", cwd=tmp_path, env=env)
     assert res.returncode == 0, res.stderr
-    assert "general.concurrency = 7" in res.stdout
+    assert "general.concurrency = 3" in res.stdout
     assert "env SHOKZ_GENERAL__CONCURRENCY" in res.stdout
 
 
@@ -85,13 +85,13 @@ def test_cli_flag_overrides_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     """
     from shokz.config.loader import load_config
 
-    monkeypatch.setenv("SHOKZ_GENERAL__CONCURRENCY", "7")
+    monkeypatch.setenv("SHOKZ_GENERAL__CONCURRENCY", "3")
     loaded = load_config(
-        cli_overrides={"general.concurrency": 9},
+        cli_overrides={"general.concurrency": 4},
         user_toml=tmp_path / "no-user.toml",
         project_toml=tmp_path / "no-project.toml",
     )
-    assert loaded.config.general.concurrency == 9
+    assert loaded.config.general.concurrency == 4
     assert loaded.sources["general.concurrency"] == "CLI"
 
 

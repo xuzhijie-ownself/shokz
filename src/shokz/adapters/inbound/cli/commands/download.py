@@ -50,8 +50,12 @@ def download_command(
         "--concurrency",
         "-c",
         min=1,
-        max=16,
-        help="Parallel downloads. (config: general.concurrency)",
+        max=4,
+        help=(
+            "In-process parallel downloads (1-4). Default 1 (sequential). "
+            "Multi-process invocations against the same --output are NOT "
+            "safe -- see Sprint 8. (config: general.concurrency)"
+        ),
     ),
     keep_raw: bool | None = typer.Option(
         None,

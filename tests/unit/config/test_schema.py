@@ -8,11 +8,11 @@ from pydantic import ValidationError
 from shokz.config.schema import AppConfig, AudioPreset
 
 
-def test_defaults_validate_clean() -> None:
-    """Sprint 3 AC: 'Built-in defaults apply when no config file exists' (schema half)."""
+def test_default_concurrency_is_1_sequential() -> None:
+    """Sprint 6 AC: default concurrency is 1 (sequential by default)."""
     cfg = AppConfig()
     assert cfg.general.output_dir.as_posix().endswith("downloads")
-    assert cfg.general.concurrency == 3
+    assert cfg.general.concurrency == 1
     assert cfg.audio.preset is AudioPreset.SWIM_STANDARD
     assert cfg.filenames.template == "{title}"
     assert cfg.sources.youtube.ejs_source == "ejs:github"
@@ -25,6 +25,19 @@ def test_invalid_value_concurrency_negative_is_rejected_at_load_time() -> None:
     msg = str(exc.value)
     assert "concurrency" in msg
     assert "greater than or equal to 1" in msg.lower() or ">= 1" in msg
+
+
+def test_concurrency_above_4_is_rejected() -> None:
+    """Sprint 6 AC: --concurrency / general.concurrency cap is 4 (was 16).
+
+    Higher caps are unsafe today (cross-process JSONL atomicity, filename
+    TOCTOU). Sprint 8 may restore a higher cap once the filelock lands.
+    """
+    with pytest.raises(ValidationError) as exc:
+        AppConfig.model_validate({"general": {"concurrency": 5}})
+    msg = str(exc.value)
+    assert "concurrency" in msg
+    assert "less than or equal to 4" in msg.lower() or "<= 4" in msg
 
 
 def test_channels_must_be_one_or_two() -> None:

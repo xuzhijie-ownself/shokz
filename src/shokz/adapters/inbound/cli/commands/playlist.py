@@ -46,7 +46,19 @@ def playlist_command(
             "(config: sources.youtube.playlist_confirm_threshold)"
         ),
     ),
-    concurrency: int | None = typer.Option(None, "--concurrency", "-c", min=1, max=16),
+    concurrency: int | None = typer.Option(
+        None,
+        "--concurrency",
+        "-c",
+        min=1,
+        max=4,
+        help=(
+            "In-process parallel downloads within this playlist (1-4). "
+            "Default 1 (sequential). Multi-process invocations against the "
+            "same --output are NOT safe -- see Sprint 8. "
+            "(config: general.concurrency)"
+        ),
+    ),
     keep_raw: bool | None = typer.Option(None, "--keep-raw/--no-keep-raw"),
     force: bool = typer.Option(False, "--force"),
     log_level: str | None = typer.Option(None, "--log-level"),

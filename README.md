@@ -28,13 +28,15 @@ shokz download "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 # -> downloads/Me at the zoo.mp3   (title-based since v0.2.0; was id-named in v0.1.0)
 
 shokz download --name "Sleep Mix Vol 1" "<URL>"      # custom filename (single-URL only)
-shokz download -c 4 URL1 URL2 URL3 URL4              # 4-way concurrency
+shokz download -c 4 URL1 URL2 URL3 URL4              # in-process concurrency 1..4 (v0.7.0+: default 1)
 shokz download --keep-raw URL                        # keep .webm in .tmp/
 shokz download --output ~/swim-mp3s URL              # custom output dir
 ```
 
 If two videos resolve to the same filename, the second auto-suffixes:
 `Foo.mp3` → `Foo (2).mp3` → `Foo (3).mp3` ...
+
+**Sequential by default (v0.7.0+)**: a bare `shokz download URL_A URL_B URL_C` processes URLs strictly in order. Pass `-c 4` (cap is 4) to enable in-process concurrency. **Do NOT** spawn multiple `shokz` processes against the same `--output` directory; the manifest layer is single-process-safe only until Sprint 8 lands cross-process file locking.
 
 ### Playlists (v0.6.0+)
 
@@ -114,8 +116,8 @@ downloads/
 shokz config init                       # write a commented sample shokz.toml
 shokz config show                       # effective config + per-key source
 shokz config path                       # which TOML files were loaded
-SHOKZ_GENERAL__CONCURRENCY=8 shokz config show   # env override visible
-shokz download --concurrency 12 URL     # CLI beats env beats TOML
+SHOKZ_GENERAL__CONCURRENCY=3 shokz config show   # env override visible (cap is 4 since v0.7.0)
+shokz download --concurrency 4 URL      # CLI beats env beats TOML
 ```
 
 The following commands ship in upcoming sprints (see `.claude/plan/shokz-downloader.md` §8 and `docs/sprints/`):

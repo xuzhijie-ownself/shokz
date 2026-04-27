@@ -19,7 +19,13 @@ class GeneralConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     output_dir: Path = Field(default=Path("./downloads"))
-    concurrency: int = Field(default=3, ge=1, le=16)
+    # Sprint 6: default lowered 3 -> 1 (sequential by default). Max lowered
+    # 16 -> 4 because the in-process pool is the ONLY safe parallelism
+    # mechanism today; multi-process invocations against the same output_dir
+    # are NOT safe (manifest JSONL atomicity beyond PIPE_BUF, filename-resolver
+    # TOCTOU, .tmp clobber). Sprint 8 lands cross-process filelock and may
+    # restore a higher cap then.
+    concurrency: int = Field(default=1, ge=1, le=4)
     keep_raw: bool = False
 
 

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] -- 2026-04-27
+
+### Changed -- Sprint 6: Sequential by default
+
+- **BREAKING (default)**: `general.concurrency` default lowered from `3` to `1`.
+  New invocations of `shokz download` or `shokz playlist` now process URLs
+  strictly sequentially unless `--concurrency` is passed. Existing user
+  configs with explicit `concurrency = N` continue to work as long as N <= 4.
+- **BREAKING (validation)**: `general.concurrency` cap lowered from `16` to `4`
+  (TOML configs and `--concurrency` CLI flag both enforce the new cap).
+  Reason: the in-process pool is the ONLY safe parallelism mechanism today;
+  multi-process invocations against the same `--output` are NOT safe due to
+  manifest JSONL atomicity beyond PIPE_BUF, filename-resolver TOCTOU, and
+  `.tmp` raw-file clobber. Sprint 8 will land cross-process filelock and
+  may restore a higher cap then.
+- CLI `--concurrency` help text updated on both `download` and `playlist`
+  commands to document the new default + the multi-process safety caveat.
+
+### Fixed -- Sprint 5 F1 follow-up
+
+- `playlist.py`: dropped the leftover second `extract_info` round-trip and
+  bare-except fallback inside `playlist_command` -- `PlaylistInfo.title` is
+  already populated by `ExpandPlaylistUseCase` via a single `extract_flat`
+  call. Eliminates a TOCTOU + silent-error-mask the Sprint 5 review (F1)
+  flagged but never landed in code.
+
+### Process / Retro
+
+- Original Sprint 6 was scoped as "Rich progress + ID3 tagging + cookie
+  guard" and split into 6a/6b after a GAN review found 5 convergent HIGH
+  issues (cross-thread Rich/asyncio, runtime_checkable Protocol extension,
+  scope creep). Sprint 6a was started, then the user re-scoped to "CLI only,
+  no live progress UI, no in-process concurrency". A second GAN review on
+  "drop concurrency entirely + recommend shell parallelism" found THREE
+  HIGH correctness bugs (manifest JSONL corruption, filename TOCTOU, .tmp
+  clobber) that would ship if multi-process was recommended. Final Sprint 6
+  shipped a much smaller scope: default concurrency = 1, keep the flag (cap
+  lowered) as escape hatch for long playlists, defer safe shell parallelism
+  to Sprint 8 (filelock).
+
 ## [0.6.0] -- 2026-04-27
 
 ### Added -- Sprint 5: Source resolution + playlists
