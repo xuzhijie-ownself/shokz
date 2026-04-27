@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] -- 2026-04-27
+
+### Added -- Sprint 8a: Safety primitives (dormant library code)
+
+> **NOT YET v1.0.** v0.9.0 ships the safety primitives as DORMANT library
+> code. Wiring + SIGINT + ENOSPC translation lands in Sprint 8b → v1.0.0.
+> Behavior of `shokz download` is identical to v0.8.0; the new primitives
+> are imported and reviewed but not yet plugged into the use case.
+
+- 4 NEW domain errors in `domain/errors.py`:
+  - `AnotherRunInProgress` -- another shokz process holds the lock
+  - `StaleLock` (with optional `raw_meta_bytes` for corruption diagnosis)
+  - `LockOwnerUnknown` -- alive PID but owned by another user
+  - `DiskFull` (with optional `need_bytes` / `have_bytes` for structured inspection)
+- NEW `application/policies/file_lock.py` -- `FileLockPolicy` wrapping
+  `filelock.FileLock` with sibling `.shokz.lock.meta` JSON atomic-written
+  via `os.replace`. Five-step classification on contention:
+  1. corrupt JSON meta → `StaleLock` (carries raw bytes)
+  2. dead PID per `psutil.NoSuchProcess` → `StaleLock`
+  3. PermissionError on `os.kill(pid, 0)` → `LockOwnerUnknown`
+  4. PID alive but `create_time` mismatch → `StaleLock` (PID reused)
+  5. PID alive AND start_time matches → `AnotherRunInProgress`
+  GAN-fixed: TOCTOU-after-Timeout retry, release-before-unlink ordering,
+  meta-write-failure releases flock, RuntimeError on impossible own-PID.
+- NEW `application/policies/disk_guard.py` -- `DiskGuardPolicy` with
+  batch-level `check_batch(output_dir, estimates)`. Sums non-None entries
+  * `safety_multiplier`, compares to `shutil.disk_usage(output_dir).free`.
+  `humanfriendly.format_size(..., binary=True)` for IEC units ("GiB" not "GB").
+  `require_estimate=True` rejects None entries with helpful message.
+- 2 NEW config sections in `config/schema.py`:
+  - `[disk] safety_multiplier: float = 2.0 (1.0..10.0)`,
+    `require_estimate: bool = False`
+  - `[lock] timeout_s: float = 5.0 (0.0..60.0)`
+- 22 NEW unit tests across `tests/unit/{domain,application}/`:
+  - `test_errors.py` extended with 4 new classes + structured attribute tests
+  - `test_schema.py` extended with 6 new bound + default tests
+  - `test_file_lock_policy.py` (NEW) -- 11 tests covering all 5 classification steps + happy-path + GAN-fix regressions
+  - `test_disk_guard_policy.py` (NEW) -- 7 tests covering batch math + None-handling + binary format
+- NEW dependency: `psutil>=5.9,<8` (for `Process(pid).create_time()` start-time check)
+
+### Why this is v0.9.0 not v1.0.0 (Sprint 8 split)
+
+Original Sprint 8 spec was v1.0.0 with cross-process lock + SIGINT + disk
+guard + 3 ENOSPC translation sites + `shokz retry`. The pre-code GAN
+sweep already split off `shokz retry` to Sprint 8.5. Mid-Phase-3 the
+implementation reached a state where ffmpeg ENOSPC translation was in
+place but local_filesystem and jsonl_manifest were not -- a strict
+regression vs v0.8.0 on the disk-full path. The Phase 3 GAN review
+(Option C verdict) recommended:
+
+1. Tag v0.9.0 with the GREEN primitives + reverted ffmpeg ENOSPC (matches
+   v0.8.0 disk-full behavior; no regression).
+2. Open a focused Sprint 8b for wiring + SIGINT + 3 ENOSPC sites + tag v1.0.0.
+
+This preserves the "every tag = green DoD" ratchet that has held across
+all 9 prior tags. The safety primitives are reviewed and locked; Sprint
+8b is just wiring + the SIGINT/asyncio.shield concurrency surface.
+
+### Process / Retro highlights
+
+- 7 GAN reviews fired across the spec + 4 implementation phases
+  (sprint-spec dual reviewer + phase-1 + phase-2 + phase-3 + Option-C process review)
+- 14 review-driven fixes baked into the spec BEFORE coding (6 BLOCK + 5 MED + 4 LOW)
+- 8 review-driven code fixes during phases (Phase 1: 4, Phase 2: 4, Phase 3 partial: 0)
+- Mid-sprint scope split kept the project's "every tag = green" ratchet
+  intact on the highest-stakes release. The "first WIP commit ever on
+  main" precedent was avoided.
+
 ## [0.8.0] -- 2026-04-27
 
 ### Added -- Sprint 7: Classified retry + error translation

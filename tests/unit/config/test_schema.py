@@ -112,3 +112,46 @@ def test_retry_backoff_base_capped_at_60s() -> None:
     accidentally-huge base from turning a small batch into an hours-long stall."""
     with pytest.raises(ValidationError, match="backoff_base_s"):
         AppConfig.model_validate({"retry": {"backoff_base_s": 61.0}})
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8: DiskSection + LockSection defaults + bounds
+# ---------------------------------------------------------------------------
+
+
+def test_disk_defaults_match_sprint_8_spec() -> None:
+    """Sprint 8: disk pre-flight defaults are conservative and opt-in-strict."""
+    cfg = AppConfig()
+    assert cfg.disk.safety_multiplier == 2.0
+    assert cfg.disk.require_estimate is False
+
+
+def test_disk_safety_multiplier_lower_bound() -> None:
+    """ge=1.0: a multiplier <1.0 would mean less-than-estimated free is OK."""
+    with pytest.raises(ValidationError, match="safety_multiplier"):
+        AppConfig.model_validate({"disk": {"safety_multiplier": 0.5}})
+
+
+def test_disk_safety_multiplier_upper_bound() -> None:
+    """le=10.0: capped so a typo can't turn 1 GB into 'need 10 GB'."""
+    with pytest.raises(ValidationError, match="safety_multiplier"):
+        AppConfig.model_validate({"disk": {"safety_multiplier": 11.0}})
+
+
+def test_lock_default_timeout_is_5s() -> None:
+    """Sprint 8: enough time for the holder to release on graceful exit;
+    short enough not to surprise the user."""
+    cfg = AppConfig()
+    assert cfg.lock.timeout_s == 5.0
+
+
+def test_lock_timeout_lower_bound_zero() -> None:
+    """ge=0.0: 0 = immediate classification (no wait)."""
+    cfg = AppConfig.model_validate({"lock": {"timeout_s": 0.0}})
+    assert cfg.lock.timeout_s == 0.0
+
+
+def test_lock_timeout_capped_at_60s() -> None:
+    """le=60.0: a typo can't make `shokz` hang for hours waiting on a lock."""
+    with pytest.raises(ValidationError, match="timeout_s"):
+        AppConfig.model_validate({"lock": {"timeout_s": 3600.0}})

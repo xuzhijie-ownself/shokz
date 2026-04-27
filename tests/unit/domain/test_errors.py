@@ -11,13 +11,17 @@ from __future__ import annotations
 import pytest
 
 from shokz.domain.errors import (
+    AnotherRunInProgress,
     AuthRequired,
+    DiskFull,
     DownloadFailed,
     FormatUnavailable,
+    LockOwnerUnknown,
     NetworkError,
     RateLimited,
     ShokzError,
     SourceUnavailable,
+    StaleLock,
 )
 
 
@@ -30,6 +34,11 @@ from shokz.domain.errors import (
         NetworkError,
         SourceUnavailable,
         DownloadFailed,
+        # Sprint 8 additions
+        AnotherRunInProgress,
+        StaleLock,
+        LockOwnerUnknown,
+        DiskFull,
     ],
 )
 def test_classified_errors_are_shokz_errors(exc_class: type[Exception]) -> None:
@@ -55,3 +64,40 @@ def test_rate_limited_default_message_is_empty() -> None:
     err = RateLimited()
     assert err.retry_after_seconds is None
     assert str(err) == ""
+
+
+# Sprint 8 Phase 1 GAN: structured attributes on the new error classes
+
+
+def test_disk_full_carries_need_and_have_bytes_for_structured_inspection() -> None:
+    """Phase 1 GAN HIGH#1: DiskFull's numeric values stay accessible
+    (not just buried in the formatted message) so the future --ui json
+    event stream + unit tests can inspect them."""
+    err = DiskFull(
+        "insufficient disk", need_bytes=1_000_000_000, have_bytes=500_000_000
+    )
+    assert err.need_bytes == 1_000_000_000
+    assert err.have_bytes == 500_000_000
+    assert "insufficient" in str(err)
+
+
+def test_disk_full_default_constructor_no_args_works() -> None:
+    """For synthetic test raises and ENOSPC translation sites where the
+    exact byte counts aren't easily knowable."""
+    err = DiskFull()
+    assert err.need_bytes is None
+    assert err.have_bytes is None
+
+
+def test_stale_lock_carries_raw_meta_bytes_for_diagnostic_logging() -> None:
+    """Phase 1 GAN HIGH#2: corrupt-meta diagnosis keeps the unparseable
+    bytes accessible for the WARNING log + Sprint 9 doctor."""
+    truncated = b'{"pid": 1234, "started_at": 169'  # truncated mid-write
+    err = StaleLock("lock meta corrupt", raw_meta_bytes=truncated)
+    assert err.raw_meta_bytes == truncated
+
+
+def test_stale_lock_default_constructor() -> None:
+    """For the dead-PID case where there's nothing to attach."""
+    err = StaleLock("dead PID 99999")
+    assert err.raw_meta_bytes is None
