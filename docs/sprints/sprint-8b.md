@@ -1,9 +1,16 @@
 # Sprint 8b — Wire safety primitives + SIGINT + 3 ENOSPC sites (v1.0.0 ⭐)
 
-**Date:** TBD (after Sprint 8a closes at v0.9.0)
-**Tag target:** `v1.0.0` (the marquee release — DEFERRED from Sprint 8 split)
-**Effort:** ~½–1 day
-**Status:** STUB — DoR will be checked when 8b begins.
+**Date:** 2026-04-27 (same-day push after v0.9.0; architect-PUSH verdict)
+**Tag target:** `v1.0.0`
+**Effort:** ~½ day
+**Status:** ✅ COMPLETED — wired, GAN-reviewed (1 HIGH + 2 MED found and fixed), 237 tests pass
+
+## Closing notes
+
+- Phase A: 3 ENOSPC translations (`ffmpeg_encoder.py`, `local_filesystem.py`, `jsonl_manifest.py`) + 7 unit tests
+- Phase B: `BatchDownloadUseCase` wired with `DiskGuardPolicy`, `asyncio.shield`-drain pattern around `manifest.record`, raw `.tmp/<id>.*` cleanup in `finally`, first-DiskFull-aborts-rest, `BatchDownloadResult.disk_full_count`, parallelised pre-resolve cache
+- Phase C: `_runtime.py` helper (FileLockPolicy + SIGINT-handling `asyncio.run`), `download` and `playlist` CLI commands wrapped in `with build_output_lock(config):` plus `run_async_with_sigint(...)`, composition wires `DiskGuardPolicy`
+- Phase D: 4 acceptance tests, summary line concurrency-aware, GAN review found 1 HIGH (asyncio `CancelledError` not converted back to `KeyboardInterrupt` because `loop.add_signal_handler` replaces Runner's internal handler) + 2 MED (`glob.escape` for non-YouTube IDs; concurrency>1 multi-trigger summary phrasing). All fixed.
 
 ## Origin
 

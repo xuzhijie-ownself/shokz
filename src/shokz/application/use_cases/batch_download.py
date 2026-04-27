@@ -11,6 +11,8 @@ Out of scope for Sprint 1 (deferred per docs/sprints/sprint-1.md):
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import glob as _glob
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -19,6 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeAlias, TypeVar
 
+from shokz.application.policies.disk_guard import DiskGuardPolicy
 from shokz.application.policies.filename_resolver import FilenameResolver
 from shokz.application.policies.reconciliation import ReconciliationPolicy
 from shokz.application.policies.retry import RetryPolicy
@@ -30,6 +33,7 @@ from shokz.application.ports.outbound.progress import ProgressReporterPort
 from shokz.application.ports.outbound.video_source import VideoSourcePort
 from shokz.domain.errors import (
     AuthRequired,
+    DiskFull,
     DownloadFailed,
     EncodingFailed,
     FormatUnavailable,
@@ -76,6 +80,10 @@ _ERROR_CLASS_MAP: tuple[tuple[type[BaseException], str], ...] = (
     (NameInvalid, "NAME_INVALID"),
     (NameAmbiguous, "NAME_AMBIGUOUS"),
     (ManifestInconsistent, "MANIFEST_INCONSISTENT"),
+    # Sprint 8b: ENOSPC at any of the 3 outbound-adapter sites surfaces as
+    # DiskFull (or ManifestInconsistent FROM DiskFull for the manifest
+    # site -- which classifies under MANIFEST_INCONSISTENT above).
+    (DiskFull, "DISK_FULL"),
     # DownloadFailed is the catch-all default for ShokzError-typed errors
     # we couldn't classify more specifically; MUST come LAST so subclasses
     # of DownloadFailed (none today, future-proof) classify first.
@@ -126,6 +134,11 @@ class BatchDownloadResult:
     # breaker tripped (3 consecutive RateLimited tracks); the rest of
     # the batch downgraded to no-retry to avoid hours of pointless waits.
     rate_limit_circuit_tripped: bool = False
+    # Sprint 8b: count of tracks aborted because the FIRST DiskFull tripped
+    # the disk-full circuit (the per-batch first-DiskFull-aborts-rest
+    # invariant). Surfaced in the CLI summary so users know remaining
+    # tracks were not attempted (vs failed individually).
+    disk_full_count: int = 0
 
     @property
     def succeeded(self) -> int:
@@ -155,6 +168,7 @@ class BatchDownloadUseCase:
         reconciliation: ReconciliationPolicy,
         *,
         retry_policy: RetryPolicy | None = None,
+        disk_guard: DiskGuardPolicy | None = None,
     ) -> None:
         if not sources:
             raise ValueError("at least one VideoSourcePort required")
@@ -169,6 +183,9 @@ class BatchDownloadUseCase:
         # Sprint 7: optional ISP retry policy. None = no retry (existing
         # tests / library callers green by default).
         self._retry_policy = retry_policy
+        # Sprint 8b: optional batch-level disk pre-flight. None = no check
+        # (existing tests green by default).
+        self._disk_guard = disk_guard
 
     async def execute(self, inp: BatchDownloadInput) -> BatchDownloadResult:
         # F6: reject symlinked output_dir BEFORE any work.
@@ -214,6 +231,22 @@ class BatchDownloadUseCase:
         # Build the per-run resolver from the configured output_dir.
         resolver = self._resolver_factory(target_dir)
 
+        # Sprint 8b GAN B3: ONE disk pre-flight per execute(), AFTER
+        # resolving all metadata so we have filesize_approx. Skipped when
+        # `disk_guard is None` (existing tests / library callers green).
+        # Pre-resolved tracks are cached in `self._track_cache` and reused
+        # by _process_one to avoid resolving twice.
+        self._track_cache: dict[str, Track] = {}
+        if self._disk_guard is not None:
+            estimates = await self._pre_resolve_for_disk_guard(inp.urls, target_dir)
+            try:
+                self._disk_guard.check_batch(inp.output_dir, estimates)
+            except DiskFull:
+                # Pre-flight failure -- abort the whole batch BEFORE any
+                # downloads start. Caller (CLI) translates to user-visible
+                # error + non-zero exit.
+                raise
+
         sem = asyncio.Semaphore(inp.concurrency)
         started = time.monotonic()
 
@@ -223,6 +256,17 @@ class BatchDownloadUseCase:
         self._consecutive_rate_limits = 0
         self._unclassified_yt_dlp_errors = 0
         self._circuit_tripped = False
+        # Sprint 8b: first-DiskFull-aborts-rest invariant. Once any track
+        # raises DiskFull, every subsequent _process_one short-circuits to
+        # a synthesised TrackResult(status=FAILED, error="aborted by prior
+        # DiskFull") so we don't keep encoding into an already-full disk.
+        # GAN MED#3 caveat: at concurrency>1 multiple in-flight tracks
+        # may pass the line-272 guard check before any of them flips the
+        # flag, so several can independently hit ENOSPC. The summary in
+        # _summary.py distinguishes "triggered" vs "short-circuited" so
+        # the user-visible message is correct in both regimes.
+        self._disk_full_tripped = False
+        self._disk_full_count = 0
 
         async def bounded(url: str) -> TrackResult:
             async with sem:
@@ -244,7 +288,41 @@ class BatchDownloadUseCase:
             elapsed_s=time.monotonic() - started,
             unclassified_yt_dlp_errors=self._unclassified_yt_dlp_errors,
             rate_limit_circuit_tripped=self._circuit_tripped,
+            disk_full_count=self._disk_full_count,
         )
+
+    async def _pre_resolve_for_disk_guard(
+        self, urls: tuple[str, ...], target_dir: Path
+    ) -> list[int | None]:
+        """Sprint 8b GAN B3: resolve all tracks BEFORE the disk pre-flight
+        so we have filesize_approx in hand. Cache the resolved Track per
+        url so `_process_one` reuses it (no double-resolve). On per-url
+        resolve failure, treat the estimate as None (best-effort) -- the
+        actual download path will surface the error normally.
+
+        Parallelised under the same semaphore-style cap (4) as the rest
+        of yt-dlp work, so a 60-track playlist's pre-flight isn't 60x
+        slower than its concurrent-download phase.
+        """
+        sem = asyncio.Semaphore(4)
+
+        async def _resolve_one(url: str) -> int | None:
+            async with sem:
+                try:
+                    source = self._select_source(url)
+                    track = await source.resolve(url)
+                    self._track_cache[url] = track
+                    return track.filesize_approx
+                except Exception as e:
+                    # Non-fatal: per-track download will surface the error.
+                    _log.debug(
+                        "pre-resolve for disk guard failed for %s: %s "
+                        "(estimate=None; per-track resolve will retry)",
+                        url, e,
+                    )
+                    return None
+
+        return list(await asyncio.gather(*(_resolve_one(u) for u in urls)))
 
     async def _process_one(
         self,
@@ -259,6 +337,18 @@ class BatchDownloadUseCase:
         force: bool,
     ) -> TrackResult:
         started = time.monotonic()
+        # Sprint 8b: first-DiskFull-aborts-rest. Short-circuit BEFORE any
+        # work (no resolve, no download) so we don't keep hammering a
+        # full disk -- and the count surfaces in BatchDownloadResult.
+        if self._disk_full_tripped:
+            self._disk_full_count += 1
+            return TrackResult(
+                track=None,
+                status=TrackStatus.FAILED,
+                final_path=None,
+                error="aborted by prior DiskFull (first-DiskFull aborts batch)",
+                elapsed_s=time.monotonic() - started,
+            )
         try:
             source = self._select_source(url)
         except ValueError as e:
@@ -272,14 +362,21 @@ class BatchDownloadUseCase:
                 elapsed_s=time.monotonic() - started,
             )
         try:
-            # Sprint 7 C3: wrap resolve in RetryPolicy. Retry-class
-            # classification happens at adapter via _classify_message;
-            # a RateLimited or NetworkError on metadata extract retries
-            # exactly the same way as on download.
-            async def _do_resolve() -> Track:
-                return await source.resolve(url)
+            # Sprint 8b: reuse the pre-resolved Track from the disk-guard
+            # pass when present (avoids resolving twice for the common
+            # disk-guard-on path). Otherwise resolve now with retry.
+            cached = self._track_cache.pop(url, None)
+            if cached is not None:
+                track = cached
+            else:
+                # Sprint 7 C3: wrap resolve in RetryPolicy. Retry-class
+                # classification happens at adapter via _classify_message;
+                # a RateLimited or NetworkError on metadata extract retries
+                # exactly the same way as on download.
+                async def _do_resolve() -> Track:
+                    return await source.resolve(url)
 
-            track = await self._maybe_retry(_do_resolve)
+                track = await self._maybe_retry(_do_resolve)
         except ShokzError as e:
             _log.warning("resolve failed: %s -- %s", url, e)
             self._update_circuit_state(e)
@@ -359,8 +456,11 @@ class BatchDownloadUseCase:
                 next retry attempt so yt-dlp can't resume against the
                 partial / corrupt file. Phase 4 GAN MED#3: log on
                 OSError so cleanup failures don't silently masquerade as
-                downstream SourceFileCorrupt."""
-                for p in tmp_dir.glob(f"{track.id}.*"):
+                downstream SourceFileCorrupt. Sprint 8b GAN MED#2:
+                glob.escape so a future non-YouTube source whose track.id
+                contains glob metacharacters (`?*[]`) doesn't unlink
+                unrelated files."""
+                for p in tmp_dir.glob(f"{_glob.escape(track.id)}.*"):
                     try:
                         p.unlink()
                     except OSError as exc:
@@ -410,9 +510,30 @@ class BatchDownloadUseCase:
 
             # SF-4: record manifest BEFORE removing raw.
             # py-rev Issue 1: record measured_duration_s (actual), not source-claimed.
-            await self._manifest.record(
-                _build_manifest_entry(track, final, output_dir, spec, measured_duration_s)
+            #
+            # Sprint 8b GAN B1: shield + drain pattern.
+            # If SIGINT cancels us BETWEEN os.replace (final file landed)
+            # and the manifest row write, we'd orphan the mp3. asyncio.shield
+            # protects the manifest task from cancellation; on CancelledError
+            # we still await the (possibly already-running) task in the
+            # except block so the manifest row durably lands before we
+            # propagate the cancellation. _record_failure later (or
+            # reconciliation on next startup) handles the half-state.
+            manifest_task = asyncio.create_task(
+                self._manifest.record(
+                    _build_manifest_entry(
+                        track, final, output_dir, spec, measured_duration_s
+                    )
+                )
             )
+            try:
+                await asyncio.shield(manifest_task)
+            except asyncio.CancelledError:
+                # Drain: wait for the protected task to finish so the
+                # manifest row lands before we re-raise CancelledError.
+                with contextlib.suppress(BaseException):
+                    await manifest_task
+                raise
 
             if not keep_raw:
                 self._filesystem.remove(raw.path)
@@ -432,6 +553,13 @@ class BatchDownloadUseCase:
         except ShokzError as e:
             _log.warning("download/encode failed: %s -- %s", track.id, e)
             self._update_circuit_state(e)
+            # Sprint 8b: first-DiskFull-aborts-rest. Trip the per-batch
+            # flag so subsequent _process_one calls short-circuit. We also
+            # count THIS track as the first DiskFull (so the summary
+            # disk_full_count includes the trigger, not just the aborts).
+            if isinstance(e, DiskFull):
+                self._disk_full_tripped = True
+                self._disk_full_count += 1
             self._progress.finish(track_id=track.id, status=TrackStatus.FAILED, message=str(e))
             await self._record_failure(track.source_url, track.source_name, track.id, e)
             return TrackResult(
@@ -455,6 +583,20 @@ class BatchDownloadUseCase:
                 elapsed_s=time.monotonic() - started,
             )
         finally:
+            # Sprint 8b GAN B6: opportunistic raw .tmp/<id>.* cleanup on
+            # any failure exit path. The success branch already removes
+            # raw via `_filesystem.remove(raw.path)` and atomic_moves the
+            # .partial to final; this glob picks up the leftover .webm /
+            # .mp3.partial when an exception unwinds before those happen
+            # (so a retry-by-CLI doesn't see a stale corrupt source).
+            # `track` is always bound here (resolve-failed paths return
+            # earlier, before entering this try). keep_raw respected.
+            # Sprint 8b GAN MED#2: glob.escape so non-YouTube source IDs
+            # with `?*[]` don't unlink unrelated files.
+            if not keep_raw:
+                for p in tmp_dir.glob(f"{_glob.escape(track.id)}.*"):
+                    with contextlib.suppress(OSError):
+                        p.unlink()
             set_track_id(None)
 
     async def _record_failure(

@@ -9,18 +9,25 @@ from pathlib import Path
 
 import typer
 
+from shokz.adapters.inbound.cli._runtime import (
+    build_output_lock,
+    run_async_with_sigint,
+)
 from shokz.adapters.inbound.cli._summary import print_batch_summary
 from shokz.application.use_cases.batch_download import BatchDownloadInput
 from shokz.composition import build_container
 from shokz.config.loader import ConfigLoadError, load_config
 from shokz.config.presets import resolve_audio_spec
 from shokz.domain.errors import (
+    AnotherRunInProgress,
     FilenameCollision,
+    LockOwnerUnknown,
     NameAmbiguous,
     NameInvalid,
     NameOutsideOutputDir,
     ShokzError,
     SourceUnavailable,
+    StaleLock,
 )
 from shokz.domain.filenames import sanitize_filename
 from shokz.observability.logging import configure_logging, set_run_id
@@ -144,26 +151,41 @@ def playlist_command(
         target_dir=target_dir,
     )
 
+    # Sprint 8b GAN M1: same lock + SIGINT scaffolding as `download`. The
+    # earlier `expand_playlist` call (metadata extract) is intentionally
+    # NOT under the lock; only the actual download phase needs single-
+    # writer guarantees on `output_dir`.
+    output_lock = build_output_lock(config)
     try:
-        result = asyncio.run(container.batch_download.execute(inp))
-    except NameAmbiguous as e:
+        with output_lock:
+            try:
+                result = run_async_with_sigint(
+                    container.batch_download.execute(inp)
+                )
+            except KeyboardInterrupt:
+                typer.echo("interrupted", err=True)
+                sys.exit(130)
+            except NameAmbiguous as e:
+                typer.echo(f"error: {e}", err=True)
+                sys.exit(2)
+            except NameInvalid as e:
+                typer.echo(f"error: {e}", err=True)
+                sys.exit(2)
+            except NameOutsideOutputDir as e:
+                typer.echo(f"error: {e}", err=True)
+                sys.exit(1)
+            except FilenameCollision as e:
+                typer.echo(f"error: {e}", err=True)
+                sys.exit(1)
+            except ShokzError as e:
+                typer.echo(f"error: {e}", err=True)
+                sys.exit(1)
+            except Exception as e:
+                log.exception("unexpected error")
+                typer.echo(f"unexpected error: {e!r}", err=True)
+                sys.exit(1)
+    except (AnotherRunInProgress, StaleLock, LockOwnerUnknown) as e:
         typer.echo(f"error: {e}", err=True)
-        sys.exit(2)
-    except NameInvalid as e:
-        typer.echo(f"error: {e}", err=True)
-        sys.exit(2)
-    except NameOutsideOutputDir as e:
-        typer.echo(f"error: {e}", err=True)
-        sys.exit(1)
-    except FilenameCollision as e:
-        typer.echo(f"error: {e}", err=True)
-        sys.exit(1)
-    except ShokzError as e:
-        typer.echo(f"error: {e}", err=True)
-        sys.exit(1)
-    except Exception as e:
-        log.exception("unexpected error")
-        typer.echo(f"unexpected error: {e!r}", err=True)
         sys.exit(1)
 
     print_batch_summary(result, kind="playlist")

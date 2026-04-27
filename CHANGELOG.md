@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] -- 2026-04-27
+
+### Added -- Sprint 8b: wire the v0.9.0 primitives end-to-end
+
+v0.9.0 shipped FileLockPolicy + DiskGuardPolicy + 4 domain errors as
+dormant library code. Sprint 8b plugs them into the use case + CLI and
+adds the three ENOSPC translation sites that v0.9.0 deferred.
+
+- `BatchDownloadUseCase`:
+  - Optional `disk_guard: DiskGuardPolicy | None` constructor arg.
+    When set, runs ONE pre-flight per `execute()` after resolving all
+    track metadata in parallel. Pre-flight failure raises `DiskFull`
+    BEFORE any download starts.
+  - `BatchDownloadResult.disk_full_count: int` field surfacing the
+    number of tracks affected by ENOSPC.
+  - First-DiskFull-aborts-rest circuit breaker: any track raising
+    `DiskFull` flips a per-batch flag; subsequent `_process_one`
+    calls short-circuit with `error="aborted by prior DiskFull"`.
+    Caveat at concurrency>1: multiple in-flight tracks may
+    independently hit ENOSPC before the flag flips; the summary
+    distinguishes "triggered" vs "short-circuited".
+  - `asyncio.shield + drain` around `manifest.record` (Sprint 8 GAN
+    B1): SIGINT during the post-`os.replace`/pre-manifest-row window
+    no longer orphans the mp3. The cancel-driver awaits the shielded
+    manifest task before propagating `CancelledError`.
+  - `_process_one` finally-block opportunistically cleans up
+    `tmp_dir/<glob.escape(track.id)>.*` on failure paths so a CLI
+    retry sees no stale corrupt source. `keep_raw=True` respected.
+- 3 ENOSPC translation sites:
+  - `ffmpeg_encoder.py`: stderr-text `"no space left"` /
+    `"enospc"` (case-insensitive) → `DiskFull`. Cleans up
+    `dest.partial` before raising.
+  - `local_filesystem.py`: `OSError(errno.ENOSPC)` on `os.replace`
+    → `DiskFull` chained from the OSError.
+  - `jsonl_manifest.py`: `OSError(errno.ENOSPC)` on `os.write` →
+    `ManifestInconsistent` (the recoverable signal class)
+    `from DiskFull` (the underlying cause). Reconciliation
+    catches the resulting orphan mp3 on next startup.
+- `Track.filesize_approx: int | None` -- yt-dlp's pre-download size
+  estimate. Populated from `info["filesize_approx"]` falling back to
+  `info["filesize"]`. Feeds `DiskGuardPolicy.check_batch`.
+- CLI cross-process advisory lock + signal handling
+  (`adapters/inbound/cli/_runtime.py`):
+  - `build_output_lock(config)` constructs a FileLockPolicy on
+    `<output_dir>/.shokz/locks/shokz.lock` with timeout from
+    `[lock] timeout_s`.
+  - `run_async_with_sigint(coro)` runs the coroutine under
+    `asyncio.run` with a SIGINT handler that cancels the main task
+    on first Ctrl+C and restores `SIG_DFL` on second Ctrl+C.
+    Converts the asyncio `CancelledError` back to `KeyboardInterrupt`
+    (Phase D GAN HIGH#1) so the CLI's exit-130 branch fires.
+  - `download` and `playlist` commands now wrap their `asyncio.run`
+    in `with build_output_lock(config):` plus
+    `run_async_with_sigint(...)`. Lock contention surfaces as
+    `AnotherRunInProgress` / `StaleLock` / `LockOwnerUnknown`
+    with actionable messages.
+- `composition.py` wires `DiskGuardPolicy(safety_multiplier,
+  require_estimate)` into `BatchDownloadUseCase`.
+- 7 NEW unit tests in `tests/unit/adapters/test_enospc_translations.py`
+  covering all 3 translation sites with monkey-patched OSError /
+  stderr text.
+- 4 NEW acceptance tests in
+  `tests/acceptance/test_sprint_8b_lock_signal_disk.py` covering
+  pre-flight blocking, mid-batch DiskFull cascade, raw-tmp cleanup
+  on failure, and lock contention.
+
+### Changed
+
+- `BatchDownloadResult` -- added `disk_full_count: int = 0` field.
+- CLI `_summary.py` -- new line surfacing DiskFull triggered/aborted
+  split when `disk_full_count > 0`.
+
 ## [0.9.0] -- 2026-04-27
 
 ### Added -- Sprint 8a: Safety primitives (dormant library code)

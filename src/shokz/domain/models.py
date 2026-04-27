@@ -31,6 +31,11 @@ class Track:
     source_url: str
     source_name: str = "youtube"
     original_title: str | None = None  # Sprint 4: preserved unsanitized; defaults to title
+    # Sprint 8b: yt-dlp's filesize_approx (or filesize) for the disk-guard
+    # pre-flight. None = source couldn't predict (live stream / chunked HLS
+    # without estimate); the policy logs WARNING and proceeds in default
+    # best-effort mode (or raises DiskFull if [disk] require_estimate=true).
+    filesize_approx: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

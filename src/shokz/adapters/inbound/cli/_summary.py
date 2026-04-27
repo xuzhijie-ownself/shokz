@@ -53,3 +53,22 @@ def print_batch_summary(result: BatchDownloadResult, kind: BatchKind) -> None:
             "without retry (try again later)",
             err=True,
         )
+    # Sprint 8b: surface DiskFull. At concurrency=1 the first DiskFull
+    # short-circuits the rest cleanly; at concurrency>1 multiple in-flight
+    # tracks may all hit ENOSPC before the circuit trips, so distinguish
+    # the trigger(s) from the truly-short-circuited aborts (Sprint 8b GAN
+    # MED#3 -- concurrency-aware messaging).
+    if result.disk_full_count > 0:
+        scope = "batch" if kind == "batch" else "playlist"
+        aborted = sum(
+            1
+            for r in result.results
+            if r.error and "aborted by prior DiskFull" in r.error
+        )
+        triggered = result.disk_full_count - aborted
+        typer.echo(
+            f"  disk full: {triggered} track(s) hit ENOSPC, "
+            f"{aborted} short-circuited by the {scope} circuit "
+            "(free up space and re-run -- skip-existing will resume)",
+            err=True,
+        )

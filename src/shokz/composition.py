@@ -14,6 +14,7 @@ from shokz.adapters.outbound.jsonl_manifest import JsonlManifest
 from shokz.adapters.outbound.local_filesystem import LocalFileSystem
 from shokz.adapters.outbound.null_progress import NullProgressReporter
 from shokz.adapters.outbound.ytdlp_source import YouTubeSource
+from shokz.application.policies.disk_guard import DiskGuardPolicy
 from shokz.application.policies.filename_resolver import FilenameResolver
 from shokz.application.policies.reconciliation import ReconciliationPolicy
 from shokz.application.policies.retry import RetryPolicy
@@ -69,6 +70,14 @@ def build_container(config: AppConfig) -> Container:
     # Sprint 7: classified retry with per-error-class budgets.
     retry_policy = RetryPolicy(config.retry)
 
+    # Sprint 8b: batch-level disk pre-flight (DiskGuardPolicy is a frozen
+    # dataclass). Constructed from [disk] config; the use case enforces
+    # ONE check per execute() after resolve-all.
+    disk_guard = DiskGuardPolicy(
+        safety_multiplier=config.disk.safety_multiplier,
+        require_estimate=config.disk.require_estimate,
+    )
+
     batch_download = BatchDownloadUseCase(
         sources=sources,
         encoder=encoder,
@@ -79,6 +88,7 @@ def build_container(config: AppConfig) -> Container:
         skip_existing=skip_existing,
         reconciliation=reconciliation,
         retry_policy=retry_policy,
+        disk_guard=disk_guard,
     )
     list_library = ListLibraryUseCase(manifest=manifest)
     show_library = ShowLibraryUseCase(manifest=manifest)

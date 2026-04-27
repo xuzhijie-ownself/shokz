@@ -10,6 +10,7 @@ the next read but disappears on power-cut.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from shokz.application.ports.outbound.manifest import ManifestPort
+from shokz.domain.errors import DiskFull, ManifestInconsistent
 from shokz.domain.models import FailureEntry, ManifestEntry
 
 _log = logging.getLogger("shokz.adapter.manifest")
@@ -84,8 +86,22 @@ def _append_with_fsync(path: Path, payload: dict[str, object]) -> None:
     # Open with low-level os to get a fd we can fsync.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     try:
-        os.write(fd, line.encode("utf-8"))
-        os.fsync(fd)
+        try:
+            os.write(fd, line.encode("utf-8"))
+            os.fsync(fd)
+        except OSError as e:
+            if e.errno == errno.ENOSPC:
+                # Sprint 8b GAN M3: ENOSPC during manifest append is a
+                # specific kind of inconsistency -- the final mp3 has
+                # already landed (Sprint 4 atomic-move runs BEFORE this),
+                # but the manifest row didn't. Reconciliation will catch
+                # the orphan file. Raise ManifestInconsistent (the
+                # recoverable signal) FROM DiskFull (the underlying cause).
+                raise ManifestInconsistent(
+                    f"manifest append failed for {path} -- final file landed "
+                    "but manifest row did not; run `shokz library verify`"
+                ) from DiskFull(f"disk full during manifest append at {path}")
+            raise
     finally:
         os.close(fd)
     # And fsync the parent dir so the (possibly newly-grown) entry is durable.

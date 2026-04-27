@@ -16,9 +16,12 @@ genealogy from v0.2.0 review).
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 from pathlib import Path
+
+from shokz.domain.errors import DiskFull
 
 _log = logging.getLogger("shokz.adapter.fs")
 
@@ -27,7 +30,17 @@ class LocalFileSystem:
     """FileSystemPort implementation using os.replace + fsync chain."""
 
     def atomic_move(self, src: Path, dest: Path) -> None:
-        os.replace(src, dest)
+        # Sprint 8b: ENOSPC during os.replace -> DiskFull (.partial stays
+        # in tmp_dir for next-run cleanup; we don't unlink here because
+        # the caller's finally block / Sprint 5 reconciliation handles it).
+        try:
+            os.replace(src, dest)
+        except OSError as e:
+            if e.errno == errno.ENOSPC:
+                raise DiskFull(
+                    f"disk full during os.replace({src} -> {dest})"
+                ) from e
+            raise
         # fsync the file we just moved
         fd = os.open(dest, os.O_RDONLY)
         try:

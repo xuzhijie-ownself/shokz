@@ -177,6 +177,11 @@ class YouTubeSource:
             # instead of a bare DownloadFailed.
             raise _classify_message(str(e)) from e
 
+        # Sprint 8b: pick filesize_approx (yt-dlp's pre-download estimate)
+        # OR filesize (when known exactly). None for live streams / chunked
+        # HLS without estimate -- DiskGuardPolicy.check_batch will WARN and
+        # skip from the sum (or raise if [disk] require_estimate=true).
+        size_estimate = info.get("filesize_approx") or info.get("filesize")
         return Track(
             id=str(info["id"]),
             title=str(info.get("title") or info["id"]),
@@ -184,6 +189,7 @@ class YouTubeSource:
             duration_s=int(info["duration"]) if info.get("duration") is not None else None,
             source_url=str(info.get("webpage_url") or url),
             source_name=self.name,
+            filesize_approx=int(size_estimate) if size_estimate is not None else None,
         )
 
     async def resolve_playlist(self, url: str) -> PlaylistInfo | None:

@@ -7,7 +7,6 @@ composition root. CLI flags use sentinel defaults so unspecified means
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import sys
 from datetime import UTC
@@ -16,6 +15,10 @@ from typing import Any
 
 import typer
 
+from shokz.adapters.inbound.cli._runtime import (
+    build_output_lock,
+    run_async_with_sigint,
+)
 from shokz.adapters.inbound.cli._summary import print_batch_summary
 from shokz.application.use_cases.batch_download import BatchDownloadInput
 from shokz.composition import build_container
@@ -23,11 +26,14 @@ from shokz.config.loader import ConfigLoadError, load_config
 from shokz.config.presets import resolve_audio_spec
 from shokz.config.schema import AudioPreset
 from shokz.domain.errors import (
+    AnotherRunInProgress,
     FilenameCollision,
+    LockOwnerUnknown,
     NameAmbiguous,
     NameInvalid,
     NameOutsideOutputDir,
     ShokzError,
+    StaleLock,
 )
 from shokz.observability.logging import configure_logging, set_run_id
 
@@ -139,33 +145,55 @@ def download_command(
         force=force,
     )
 
+    # Sprint 8b GAN M1: cross-process advisory lock + SIGINT handler. Lock
+    # acquired SYNC pre-asyncio.run (so __exit__ runs even if SIGINT closes
+    # the loop). AnotherRunInProgress / StaleLock / LockOwnerUnknown caught
+    # at the outermost layer so the user sees the actionable message.
+    output_lock = build_output_lock(config)
     try:
-        result = asyncio.run(container.batch_download.execute(inp))
-    except NameAmbiguous as e:
-        # User error: --name + multiple URLs. Exit 2 = invalid invocation.
+        with output_lock:
+            try:
+                result = run_async_with_sigint(
+                    container.batch_download.execute(inp)
+                )
+            except KeyboardInterrupt:
+                # Sprint 8b L1: clean Ctrl+C exit. asyncio.shield drained
+                # the in-flight manifest; reconciliation handles orphan
+                # files on next run.
+                typer.echo("interrupted", err=True)
+                sys.exit(130)
+            except NameAmbiguous as e:
+                # User error: --name + multiple URLs. Exit 2 = invalid invocation.
+                typer.echo(f"error: {e}", err=True)
+                sys.exit(2)
+            except NameInvalid as e:
+                # User error: --name sanitizes to empty. Exit 2 = invalid invocation.
+                typer.echo(f"error: {e}", err=True)
+                sys.exit(2)
+            except NameOutsideOutputDir as e:
+                # Security/config issue: traversal or symlinked output_dir. Exit 1.
+                typer.echo(f"error: {e}", err=True)
+                sys.exit(1)
+            except FilenameCollision as e:
+                # Runtime state issue: suffix loop exhausted. Exit 1.
+                typer.echo(f"error: {e}", err=True)
+                sys.exit(1)
+            except ShokzError as e:
+                # Any other domain error (incl. DiskFull from pre-flight or
+                # mid-batch): clean message, exit 1.
+                typer.echo(f"error: {e}", err=True)
+                sys.exit(1)
+            except Exception as e:
+                # F4 (Sprint 2 silent-failure fix): top-level catch-all so users see a
+                # clean message instead of a Python traceback. Sprint 7 will narrow.
+                logging.getLogger("shokz.cli").exception("unexpected error")
+                typer.echo(
+                    f"unexpected error: {e!r} (run with --log-level DEBUG for details)",
+                    err=True,
+                )
+                sys.exit(1)
+    except (AnotherRunInProgress, StaleLock, LockOwnerUnknown) as e:
         typer.echo(f"error: {e}", err=True)
-        sys.exit(2)
-    except NameInvalid as e:
-        # User error: --name sanitizes to empty. Exit 2 = invalid invocation.
-        typer.echo(f"error: {e}", err=True)
-        sys.exit(2)
-    except NameOutsideOutputDir as e:
-        # Security/config issue: traversal or symlinked output_dir. Exit 1.
-        typer.echo(f"error: {e}", err=True)
-        sys.exit(1)
-    except FilenameCollision as e:
-        # Runtime state issue: suffix loop exhausted. Exit 1.
-        typer.echo(f"error: {e}", err=True)
-        sys.exit(1)
-    except ShokzError as e:
-        # Any other domain error: clean message, exit 1.
-        typer.echo(f"error: {e}", err=True)
-        sys.exit(1)
-    except Exception as e:
-        # F4 (Sprint 2 silent-failure fix): top-level catch-all so users see a
-        # clean message instead of a Python traceback. Sprint 7 will narrow.
-        logging.getLogger("shokz.cli").exception("unexpected error")
-        typer.echo(f"unexpected error: {e!r} (run with --log-level DEBUG for details)", err=True)
         sys.exit(1)
 
     print_batch_summary(result, kind="batch")
