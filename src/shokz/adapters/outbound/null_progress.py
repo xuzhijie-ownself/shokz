@@ -1,6 +1,10 @@
-"""NullProgressReporter — no-op for tests and non-interactive runs.
+"""NullProgressReporter — the only ProgressReporterPort impl shipped today.
 
-Sprint 6 ships RichProgressReporter and JsonProgressReporter.
+The Port + null impl exist as surgical hook points in
+`BatchDownloadUseCase` (start/finish per track). Sprint 6 originally
+planned a RichProgressReporter but it was DROPPED in the Sprint 6 retro
+(scope-discipline call). Adding a real progress reporter later is a
+plug-in change at the composition root; the use case stays unchanged.
 """
 
 from __future__ import annotations
