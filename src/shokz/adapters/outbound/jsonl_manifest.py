@@ -17,10 +17,10 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from shokz.application.ports.outbound.manifest import ManifestPort
-from shokz.domain.errors import DiskFull, ManifestInconsistent
+from shokz.domain.errors import DiskFull, ManifestInconsistent, ManifestReadError
 from shokz.domain.models import FailureEntry, ManifestEntry
 
 _log = logging.getLogger("shokz.adapter.manifest")
@@ -69,12 +69,45 @@ class JsonlManifest(ManifestPort):
         return latest
 
     async def iter_all(self) -> AsyncIterator[ManifestEntry]:
-        if not self._manifest_path.exists():
-            return
+        # Sprint 8.5 Phase A GAN HIGH#2: wrap exists() so an EPERM/EIO
+        # at stat-time surfaces as ManifestReadError (not a raw OSError
+        # routed through the unexpected-error catch-all).
+        try:
+            if not self._manifest_path.exists():
+                return
+        except OSError as e:
+            raise ManifestReadError(
+                f"cannot stat {self._manifest_path}: {e}; "
+                "check file permissions and existence"
+            ) from e
         # Read in a thread to avoid blocking the event loop on large manifests.
+        # Sprint 8.5 C1: _read_jsonl wraps OSError as ManifestReadError.
         rows = await asyncio.to_thread(_read_jsonl, self._manifest_path)
         for row in rows:
-            yield ManifestEntry(**row)
+            entry = _safe_construct(ManifestEntry, row, self._manifest_path)
+            if entry is not None:
+                yield entry
+
+    async def iter_failures(self) -> AsyncIterator[FailureEntry]:
+        """Sprint 8.5: async iterator over failures.jsonl, in append order.
+
+        Mirrors iter_all. Caller (RetryFailedUseCase) is responsible for
+        the lock-acquired-before-iter ordering (spec C4); this method
+        does no locking on its own.
+        """
+        try:
+            if not self._failures_path.exists():
+                return
+        except OSError as e:
+            raise ManifestReadError(
+                f"cannot stat {self._failures_path}: {e}; "
+                "check file permissions and existence"
+            ) from e
+        rows = await asyncio.to_thread(_read_jsonl, self._failures_path)
+        for row in rows:
+            entry = _safe_construct(FailureEntry, row, self._failures_path)
+            if entry is not None:
+                yield entry
 
     async def _append(self, path: Path, payload: dict[str, object]) -> None:
         async with self._lock:
@@ -113,16 +146,59 @@ def _append_with_fsync(path: Path, payload: dict[str, object]) -> None:
     _log.debug("manifest append + dual-fsync: %s (+%d bytes)", path, len(line))
 
 
+_T = TypeVar("_T")
+
+
+def _safe_construct(
+    cls: type[_T], row: dict[str, Any], path: Path
+) -> _T | None:
+    """Sprint 8.5 Phase A GAN HIGH#3: build a frozen dataclass from a JSONL
+    row, returning None + WARNING on any TypeError (unknown / missing /
+    typo'd field). Without this, a partial-write that produces a complete
+    JSON object with truncated content (e.g. `{}` or a row from a future
+    schema_version with extra keys) would raise an unhandled TypeError
+    from the iterator and route through the CLI's unexpected-error
+    catch-all. The WARNING also surfaces silent schema drift.
+    """
+    try:
+        return cls(**row)
+    except TypeError as e:
+        _log.warning(
+            "skipping structurally invalid row in %s: %s (row keys: %s)",
+            path, e, sorted(row.keys()),
+        )
+        return None
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Read all rows from a JSONL file, skipping malformed lines with a log warn."""
+    """Read all rows from a JSONL file, skipping malformed lines with WARNING.
+
+    Sprint 8.5 C1: OSError (e.g. EPERM, EIO) wrapped as ManifestReadError so
+    the CLI can surface a named, actionable message instead of routing
+    through the unexpected-error catch-all.
+
+    Sprint 8.5 U1: malformed-row log was DEBUG; raised to WARNING so
+    partial-write races during concurrent appends are visible in default
+    log output (the row IS silently dropped from the result set; making
+    the log level WARNING is the user's only signal that this happened).
+    """
     rows: list[dict[str, object]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for n, raw_line in enumerate(f, start=1):
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                _log.warning("skipping malformed manifest row %d in %s", n, path)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for n, raw_line in enumerate(f, start=1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    _log.warning(
+                        "skipping malformed jsonl row %d in %s "
+                        "(possible partial write from concurrent appender)",
+                        n, path,
+                    )
+    except OSError as e:
+        raise ManifestReadError(
+            f"cannot read {path}: {e}; check file permissions and existence"
+        ) from e
     return rows

@@ -149,6 +149,14 @@ class FakeManifest:
         for e in self.successes:
             yield e
 
+    async def iter_failures(self):  # type: ignore[no-untyped-def]
+        # Sprint 8.5: ManifestPort gained iter_failures. The shared
+        # FakeManifest mirrors record_failure -> iter_failures so call
+        # sites that pass `FakeManifest()` to anything typed
+        # `manifest: ManifestPort` stay structurally satisfied.
+        for e in self.failures:
+            yield e
+
 
 @dataclass
 class FakeFileSystem:

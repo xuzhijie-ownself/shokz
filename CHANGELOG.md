@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] -- 2026-04-30
+
+### Added -- Sprint 8.5: `shokz retry` (re-process `failures.jsonl`)
+
+A swimmer whose Friday-evening playlist run ended with 3 RateLimited
+failures and 1 NetworkError can run `shokz retry` Saturday morning and
+recover the missing tracks without copy-pasting URLs out of
+`failures.jsonl`. v1.0.0 shipped retry WITHIN a batch (Sprint 7
+RetryPolicy); 8.5 extends that to ACROSS batches.
+
+- `shokz retry [--output PATH] [--since TIMESTAMP_OR_RELATIVE]
+  [--error-class CLS [-e CLS]] [--all] [--dry-run] [-c N] [--log-level]`
+- `RetryFailedUseCase` (`application/use_cases/retry_failed.py`):
+  - Filters `failures.jsonl` by retryable error class. Default allow-list:
+    `NETWORK_ERROR / RATE_LIMITED / SOURCE_FILE_CORRUPT / DOWNLOAD_FAILED`.
+    Terminal classes (AUTH_REQUIRED / FORMAT_UNAVAILABLE / NAME_* /
+    ENCODING_FAILED / MANIFEST_INCONSISTENT / DISK_FULL) skipped unless
+    `--all` is passed (which emits a per-row WARNING).
+  - Time filter via `--since` (relative `\d+[smhdw]` or ISO-8601
+    UTC). Inclusive at the boundary. Both sides timezone-aware UTC.
+  - Dedupe by `(source, track_id)`, newest-`failed_at` wins; loser rows
+    surface in `RetryFailedResult.skipped_deduped`. Conflicting URLs
+    for the same track surface a WARNING + `skipped_url_variants`.
+  - Null-identity rows (resolve-failed: source/track_id both None) key
+    on `url` instead of `(source, track_id)` so 4 separate
+    resolve-failures don't collapse to 1.
+  - `--dry-run` prints the plan + audit, runs the lock-protected read,
+    skips the batch invoke entirely.
+  - Scope-warn: when `--since=None` and the candidate set spans > 7
+    days OR > 50 rows, emit a single WARNING with count + oldest date
+    so the user knows to scope future invocations.
+  - Reuses the underlying `BatchDownloadUseCase` (skip-existing,
+    classified retry, file lock, SIGINT shield, disk pre-flight all
+    flow through unchanged from v1.0.0).
+- `ManifestPort.iter_failures()` (NEW port method) + `JsonlManifest`
+  implementation mirroring `iter_all`. Wraps `OSError` (incl. failing
+  stat) as `ManifestReadError` so the CLI surfaces actionable text.
+  Dataclass-construction TypeErrors (unknown/missing field, e.g.
+  partial-write `{}` rows or future schema_version drift) get a
+  WARNING + skip via the new `_safe_construct` helper.
+- `_read_jsonl` malformed-row log lifted DEBUG → WARNING (visibility
+  for partial-write races).
+- `shokz retry` CLI command (`adapters/inbound/cli/commands/retry.py`):
+  - Reuses `_runtime.build_output_lock` + `run_async_with_sigint` from
+    Sprint 8b.
+  - Spec C4 ordering: stat-then-short-circuit before lock acquire when
+    `failures.jsonl` is absent; otherwise lock acquired BEFORE
+    `iter_failures` so the read happens inside the single-writer
+    guarantee. The TOCTOU window for "concurrent download writes the
+    FIRST failure row between our stat and our return" is bounded:
+    that row persists for the next `shokz retry` run.
+  - Mutually-exclusive flags: `--all` + `--error-class` rejected at
+    CLI pre-check (and again as defense-in-depth in the use case).
+  - Audit summary printed to stdout (single stream with batch summary
+    + dry-run plan).
+- 28 NEW tests + 1 final-GAN follow-up = 29:
+  - 5 NEW unit tests in `tests/unit/adapters/test_jsonl_manifest.py`
+    (iter_failures happy path / missing file / OSError wrap /
+    valid-JSON-but-invalid-dataclass skip / WARNING-level malformed-row),
+    + 1 `iter_all` coverage test (Sprint 8.5 final-GAN H2)
+  - 20 unit tests in `tests/unit/application/test_retry_failed.py`
+    covering all 14 spec Gherkin scenarios + parse_since edge cases
+  - 3 acceptance tests in
+    `tests/acceptance/test_sprint_8_5_retry.py` covering lock
+    contention, SIGINT mid-batch, SIGINT during dedup pre-batch
+- 11 spec GAN findings folded as C1-C6 / U1-U4 + 2 CRITICAL + 7 HIGH
+  Phase B GAN findings + 4 HIGH Phase C GAN findings (all addressed
+  before merge).
+
+### Changed
+
+- `_read_jsonl` malformed-row log: DEBUG → WARNING.
+- `iter_all` retroactively gains structural-row protection via
+  `_safe_construct` (consistency with `iter_failures`).
+
 ## [1.0.0] -- 2026-04-27
 
 ### Added -- Sprint 8b: wire the v0.9.0 primitives end-to-end

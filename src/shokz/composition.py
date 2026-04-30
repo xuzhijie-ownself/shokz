@@ -26,6 +26,7 @@ from shokz.application.use_cases.library_query import (
     ShowLibraryUseCase,
     VerifyLibraryUseCase,
 )
+from shokz.application.use_cases.retry_failed import RetryFailedUseCase
 from shokz.config.schema import AppConfig
 
 
@@ -38,6 +39,7 @@ class Container:
     list_library: ListLibraryUseCase
     show_library: ShowLibraryUseCase
     verify_library: VerifyLibraryUseCase
+    retry_failed: RetryFailedUseCase
     config: AppConfig
 
 
@@ -94,11 +96,18 @@ def build_container(config: AppConfig) -> Container:
     show_library = ShowLibraryUseCase(manifest=manifest)
     verify_library = VerifyLibraryUseCase(reconciliation=reconciliation)
     expand_playlist = ExpandPlaylistUseCase(sources=sources)
+    # Sprint 8.5: shokz retry. Reuses the same batch_download (skip-existing,
+    # retry, lock, SIGINT shield, disk pre-flight all flow through).
+    retry_failed = RetryFailedUseCase(
+        manifest=manifest,
+        batch_download=batch_download,
+    )
     return Container(
         batch_download=batch_download,
         expand_playlist=expand_playlist,
         list_library=list_library,
         show_library=show_library,
         verify_library=verify_library,
+        retry_failed=retry_failed,
         config=config,
     )

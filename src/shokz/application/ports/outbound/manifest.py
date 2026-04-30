@@ -1,4 +1,9 @@
-"""ManifestPort -- record + read append-only ledger (Sprint 4 + 4.5)."""
+"""ManifestPort -- record + read append-only ledger (Sprint 4 + 4.5 + 8.5).
+
+Sprint 8.5: `iter_failures` lets `RetryFailedUseCase` consume the failure
+audit log as input. Mirrors `iter_all` semantics: linear scan, append-
+order, OSError wrapped as ManifestReadError per spec C1.
+"""
 
 from __future__ import annotations
 
@@ -32,3 +37,11 @@ class ManifestPort(Protocol):
 
     def iter_all(self) -> AsyncIterator[ManifestEntry]:
         """Async iterator over every manifest entry, in append order."""
+
+    def iter_failures(self) -> AsyncIterator[FailureEntry]:
+        """Sprint 8.5: async iterator over every failure entry, in append order.
+
+        Mirrors iter_all semantics. Implementations MUST wrap OSError as
+        ManifestReadError naming the path (spec C1) so the CLI can surface
+        an actionable message instead of routing through the catch-all.
+        """

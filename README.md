@@ -94,6 +94,41 @@ shokz library verify                    # reconcile manifest <-> disk
 A startup reconciliation scan also warns once per `shokz download` invocation
 if orphan files are detected.
 
+### Retry failed downloads (v1.0.1+)
+
+`failures.jsonl` is more than an audit log — `shokz retry` reads it
+back and re-attempts every transient failure:
+
+```
+shokz retry                     # re-process all retryable rows
+shokz retry --since 2d          # only failures from the last 2 days
+shokz retry --error-class RATE_LIMITED  # explicit class filter
+shokz retry --all               # include normally-terminal classes
+                                # (AUTH_REQUIRED, FORMAT_UNAVAILABLE)
+shokz retry --dry-run           # preview the plan; no downloads
+```
+
+Default behavior:
+- Filters to retryable transient classes: `NETWORK_ERROR`,
+  `RATE_LIMITED`, `SOURCE_FILE_CORRUPT`, `DOWNLOAD_FAILED`.
+- Dedupes per `(source, track_id)` — newest failure wins. Older
+  retry attempts for the same track are surfaced in the audit
+  summary (`N skipped (older retry attempt for same track)`).
+- Respects skip-existing: tracks that already have a manifest entry
+  + file on disk are no-ops (no network call).
+- Acquires the same cross-process lock as `shokz download`, so
+  concurrent retry + download invocations against the same
+  `--output` are safe.
+
+`shokz retry` does NOT mutate `failures.jsonl` (append-only audit
+log); the manifest is the source of truth for "what's downloaded".
+It is also NOT a force-re-encode tool — to re-encode at a new
+bitrate, use `shokz download <url> --force`.
+
+When `--since` is omitted and the candidate set spans more than 7
+days OR more than 50 rows, a WARNING is printed naming the count
+and the oldest date so first-run scope blast is visible.
+
 ### Crash-safe writes + manifest (v0.4.0+)
 
 Every successful download is recorded in `downloads/.shokz/manifest.jsonl`
@@ -134,13 +169,19 @@ SHOKZ_GENERAL__CONCURRENCY=3 shokz config show   # env override visible (cap is 
 shokz download --concurrency 4 URL      # CLI beats env beats TOML
 ```
 
-The following commands ship in upcoming sprints (see `.claude/plan/shokz-downloader.md` §8 and `docs/sprints/`):
+Shipped:
 
 ```bash
+shokz download <URL> [<URL> ...]                     # Sprint 1+
 shokz playlist "<playlist URL>"                      # Sprint 5
-shokz retry [RUN_ID]                                 # Sprint 8
-shokz library list|show|verify                       # Sprint 4.5 / 9
+shokz retry [--since|--error-class|--all|--dry-run]  # Sprint 8.5
+shokz library list|show|verify                       # Sprint 4.5
 shokz config show|init|path                          # Sprint 3
+```
+
+Upcoming (see `.claude/plan/shokz-downloader.md` and `docs/sprints/`):
+
+```bash
 shokz doctor                                         # Sprint 9
 ```
 
