@@ -2,57 +2,86 @@
 
 YouTube → MP3 downloader for Shokz swimming headphones.
 
-> **Status:** Sprint 0 scaffold (`v0.0.0`). Not yet usable. See `.claude/plan/shokz-downloader.md` for the 10-sprint roadmap and `RETRO.md` for the running retrospective.
+> **Status:** `v1.1.0` — shipped. Six commands across the full
+> download / retry / inspect / diagnose lifecycle. 282 unit + 27
+> INTEGRATION tests, ruff + mypy clean. See `CHANGELOG.md` for the
+> per-version history and `RETRO.md` for sprint-by-sprint lessons.
 
 ## Why
 
-Shokz waterproof bone-conduction headphones (used for swimming) only support MP3 over USB mass-storage. This tool downloads YouTube videos in parallel, extracts and re-encodes audio to MP3 with sane defaults for the swimming context (mono, modest bitrate, capped to source).
+Shokz waterproof bone-conduction headphones (used for swimming) only
+support MP3 over USB mass-storage. This tool downloads YouTube videos,
+extracts and re-encodes audio to MP3 with sane defaults for the
+swimming context (mono, modest bitrate, capped to source).
 
-## Install (developer)
+## Install
 
-Requires Python 3.11, `uv`, `just`, `ffmpeg`.
+Requires **Python 3.11+** and **ffmpeg** (provides `ffmpeg` and
+`ffprobe` on PATH).
 
 ```bash
 git clone <repo> shokz
 cd shokz
-just install        # uv sync --all-extras
-just hooks-install  # one-time pre-commit setup
+pip install -e .            # editable install
+shokz doctor                # verify ffmpeg / yt-dlp / disk are healthy
 ```
+
+Dev tooling adds `pytest` / `ruff` / `mypy`:
+
+```bash
+pip install pytest pytest-asyncio pytest-cov time-machine ruff mypy
+pytest                      # 282 tests, no skips when INTEGRATION=1
+```
+
+(The repo also ships a `Justfile` and `uv.lock` if you prefer
+`just install` + `uv sync`.)
 
 ## Use
 
-`shokz download URL [URL ...]` is shipped in v0.1.0:
+Six commands. Run `shokz <cmd> --help` for full flag listings.
+
+### download — single URL or batch
 
 ```bash
 shokz download "https://www.youtube.com/watch?v=jNQXAC9IVRw"
-# -> downloads/Me at the zoo.mp3   (title-based since v0.2.0; was id-named in v0.1.0)
+# -> downloads/Me at the zoo.mp3
 
 shokz download --name "Sleep Mix Vol 1" "<URL>"      # custom filename (single-URL only)
-shokz download -c 4 URL1 URL2 URL3 URL4              # in-process concurrency 1..4 (v0.7.0+: default 1)
+shokz download -c 4 URL1 URL2 URL3 URL4              # in-process concurrency 1..4 (default 1)
 shokz download --keep-raw URL                        # keep .webm in .tmp/
 shokz download --output ~/swim-mp3s URL              # custom output dir
+shokz download --force URL                           # re-download even if in manifest
 ```
 
-If two videos resolve to the same filename, the second auto-suffixes:
-`Foo.mp3` → `Foo (2).mp3` → `Foo (3).mp3` ...
+Filename collisions auto-suffix: `Foo.mp3` → `Foo (2).mp3` → `Foo (3).mp3`.
 
-**Sequential by default (v0.7.0+)**: a bare `shokz download URL_A URL_B URL_C` processes URLs strictly in order. Pass `-c 4` (cap is 4) to enable in-process concurrency. Multi-process invocations against the same `--output` are SAFE since v1.0.0: the cross-process file lock (`<output_dir>/.shokz/locks/shokz.lock`) detects contention and the second invocation exits cleanly with `AnotherRunInProgress` naming the holder PID + start time + lock path.
+**Multi-process safety (v1.0.0+):** spawning two `shokz` processes
+against the same `--output` is safe — the cross-process file lock
+detects contention and the second invocation exits cleanly with
+`AnotherRunInProgress` naming the holder PID + start time + lock path.
 
-**Classified retry (v0.8.0+)**: transient YouTube failures auto-retry with sensible backoff:
+**Classified retry (v0.8.0+):** transient YouTube failures auto-retry
+with sensible backoff:
 
-| Class | Trigger (yt-dlp message contains) | Retries | Backoff |
+| Class | Trigger (yt-dlp message) | Retries | Backoff |
 |---|---|---|---|
 | `RateLimited` | `HTTP Error 429`, `too many requests` | 3 | 5s, 30s, 120s |
-| `NetworkError` | `HTTP Error 5xx`, `connection reset/refused`, DNS, timeout | 2 | 1s linear |
+| `NetworkError` | `HTTP Error 5xx`, connection reset/refused, DNS, timeout | 2 | 1s linear |
 | `SourceFileCorrupt` | post-download size < 1 KB | 1 | 1s |
-| `DownloadFailed` (default) | unrecognized | 1 | 1s |
-| `AuthRequired` | `Sign in to confirm`, `not available in your country`, members-only | **0** (terminal) | — |
+| `DownloadFailed` | unrecognized | 1 | 1s |
+| `AuthRequired` | `Sign in to confirm`, region-locked, members-only | **0** (terminal) | — |
 | `FormatUnavailable` | `Requested format not available` | **0** (terminal) | — |
-| `SourceUnavailable` | `Private video`, `Video unavailable`, `removed`, premiere/live | **0** (terminal) | — |
+| `SourceUnavailable` | `Private video`, `Video unavailable`, removed | **0** (terminal) | — |
 
-After 3 consecutive `RateLimited` outcomes the per-batch circuit breaker trips and the rest of the run skips retries (avoids 60-track playlists turning into 3-hour waits on a bad day). Retry budgets are configurable via `[retry]` in `shokz.toml`.
+After 3 consecutive `RateLimited` the per-batch circuit breaker trips
+and the rest of the batch skips retries.
 
-### Playlists (v0.6.0+)
+**SIGINT-shielded manifest (v1.0.0+):** Ctrl+C mid-download cancels
+in-flight tasks but `asyncio.shield` drains pending manifest writes
+before propagating, so an interrupted batch leaves a consistent
+manifest. Press Ctrl+C again to force-exit.
+
+### playlist — expand a YouTube playlist URL and download every video
 
 ```bash
 shokz playlist <playlist URL>                  # default: tracks under downloads/<playlist title>/
@@ -61,158 +90,149 @@ shokz playlist --yes <URL>                     # bypass the >=50-item confirmati
 shokz playlist --confirm-threshold 100 <URL>   # raise the confirmation threshold
 ```
 
-Playlists with >= the configured threshold (default 50, configurable via
-`sources.youtube.playlist_confirm_threshold` or `--confirm-threshold`)
-require explicit confirmation via `--yes` to avoid surprise overnight
-runs of 200-track playlists.
+Playlists with ≥ the configured threshold (default 50) require explicit
+`--yes` to avoid surprise overnight runs of 200-track playlists.
+`shokz library verify` walks subdirectories so per-playlist subfolders
+are correctly reconciled.
 
-`shokz library verify` walks subdirectories so per-playlist subfolders are
-correctly reconciled (does NOT false-positive each playlist track).
-
-### Skip-existing + library inspection (v0.5.0+)
-
-Re-running `shokz download` on already-completed URLs is near-instant — the
-manifest-driven skip short-circuits before any network or encoding work:
+### retry — re-process `failures.jsonl`
 
 ```bash
-shokz download <URL>                    # first time: real download
-shokz download <URL>                    # second time: SKIP in <1s
-shokz download --force <URL>            # re-download anyway (collision suffix)
+shokz retry                                    # re-process retryable rows
+shokz retry --since 2d                         # only failures from last 2 days
+shokz retry --error-class RATE_LIMITED         # explicit class filter (repeatable)
+shokz retry --all                              # include terminal classes (AUTH_REQUIRED, ...)
+shokz retry --dry-run                          # preview the plan; no downloads
+```
 
+Defaults: filters to `NETWORK_ERROR / RATE_LIMITED / SOURCE_FILE_CORRUPT
+/ DOWNLOAD_FAILED`; dedupes per `(source, track_id)` newest-wins;
+respects skip-existing. Acquires the same cross-process lock as
+`shokz download`, so concurrent retry + download against the same
+`--output` are safe.
+
+Does NOT mutate `failures.jsonl` (append-only audit log); the manifest
+is the source of truth for "what's downloaded". NOT a force-reencode
+tool — for that, use `shokz download <url> --force`.
+
+When `--since` is omitted and the candidate set spans > 7 days OR > 50
+rows, a WARNING names the count + oldest date so first-run scope blast
+is visible.
+
+### library — inspect manifest + reconcile vs disk
+
+```bash
 shokz library list                      # table of every manifest entry
 shokz library show <track_id>           # full detail for one entry
-shokz library verify                    # reconcile manifest <-> disk
-                                        # exit 1 + diagnostic on mismatch
+shokz library verify                    # reconcile manifest <-> disk; exit 1 on mismatch
 ```
 
-`library verify` surfaces:
-- **orphan files**: `*.mp3` on disk with no manifest entry (likely Sprint 4
-  SF-4 orphan window — process killed between os.replace and manifest record)
-- **orphan entries**: manifest rows whose `mp3_path` no longer exists on disk
-  (manually deleted)
+`verify` surfaces:
+- **orphan files**: `*.mp3` on disk with no manifest entry (likely
+  killed mid-write before manifest record)
+- **orphan entries**: manifest rows whose `mp3_path` no longer exists
+  on disk (manually deleted)
 
-A startup reconciliation scan also warns once per `shokz download` invocation
-if orphan files are detected.
+A startup reconciliation scan also warns once per `shokz download`
+invocation if orphan files are detected.
 
-### Retry failed downloads (v1.0.1+)
-
-`failures.jsonl` is more than an audit log — `shokz retry` reads it
-back and re-attempts every transient failure:
-
-```
-shokz retry                     # re-process all retryable rows
-shokz retry --since 2d          # only failures from the last 2 days
-shokz retry --error-class RATE_LIMITED  # explicit class filter
-shokz retry --all               # include normally-terminal classes
-                                # (AUTH_REQUIRED, FORMAT_UNAVAILABLE)
-shokz retry --dry-run           # preview the plan; no downloads
-```
-
-Default behavior:
-- Filters to retryable transient classes: `NETWORK_ERROR`,
-  `RATE_LIMITED`, `SOURCE_FILE_CORRUPT`, `DOWNLOAD_FAILED`.
-- Dedupes per `(source, track_id)` — newest failure wins. Older
-  retry attempts for the same track are surfaced in the audit
-  summary (`N skipped (older retry attempt for same track)`).
-- Respects skip-existing: tracks that already have a manifest entry
-  + file on disk are no-ops (no network call).
-- Acquires the same cross-process lock as `shokz download`, so
-  concurrent retry + download invocations against the same
-  `--output` are safe.
-
-`shokz retry` does NOT mutate `failures.jsonl` (append-only audit
-log); the manifest is the source of truth for "what's downloaded".
-It is also NOT a force-re-encode tool — to re-encode at a new
-bitrate, use `shokz download <url> --force`.
-
-When `--since` is omitted and the candidate set spans more than 7
-days OR more than 50 rows, a WARNING is printed naming the count
-and the oldest date so first-run scope blast is visible.
-
-### Crash-safe writes + manifest (v0.4.0+)
-
-Every successful download is recorded in `downloads/.shokz/manifest.jsonl`
-(append-only JSONL, schema_version=1) with file + parent-dir fsync. Killed
-processes leave NO partial `*.mp3` in `downloads/` — only `.tmp/*.partial`
-which is auto-cleaned on the next run. Integrity checks reject:
-- yt-dlp 0-byte / truncated raw downloads (post-download size check)
-- ffmpeg silent truncation (post-encode duration probe within 2%)
-
-Failures are recorded in `downloads/.shokz/failures.jsonl` with stable
-`error_class` strings for downstream tooling.
-
-Layout:
-```
-downloads/
-├── <Video Title>.mp3
-├── .tmp/                 # in-progress (auto-cleaned)
-└── .shokz/
-    ├── manifest.jsonl    # successful tracks, fsync'd per row
-    └── failures.jsonl    # per-track failures
-```
-
-### Configuration (v0.3.0+)
+### config — inspect/initialize layered configuration
 
 `shokz` reads layered configuration from (low → high precedence):
 
 1. Built-in defaults (`AppConfig` field defaults)
 2. `~/.config/shokz/config.toml`
 3. `./shokz.toml` (project-local)
-4. Env vars: `SHOKZ_GENERAL__CONCURRENCY=7`, `SHOKZ_AUDIO__PRESET=swim-low`, etc.
+4. Env vars: `SHOKZ_GENERAL__CONCURRENCY=7`, `SHOKZ_AUDIO__PRESET=swim-low`, ...
 5. CLI flags
 
 ```bash
 shokz config init                       # write a commented sample shokz.toml
 shokz config show                       # effective config + per-key source
 shokz config path                       # which TOML files were loaded
-SHOKZ_GENERAL__CONCURRENCY=3 shokz config show   # env override visible (cap is 4 since v0.7.0)
+SHOKZ_GENERAL__CONCURRENCY=3 shokz config show   # env override visible
 shokz download --concurrency 4 URL      # CLI beats env beats TOML
 ```
 
-Shipped:
+### doctor — read-only environment diagnostics (v1.1.0+)
 
 ```bash
-shokz download <URL> [<URL> ...]                     # Sprint 1+
-shokz playlist "<playlist URL>"                      # Sprint 5
-shokz retry [--since|--error-class|--all|--dry-run]  # Sprint 8.5
-shokz library list|show|verify                       # Sprint 4.5
-shokz config show|init|path                          # Sprint 3
+shokz doctor                            # six checks; exit 0 unless any FAIL
+shokz doctor --output ~/swim-mp3s       # check writability of a specific dir
 ```
 
-Upcoming (see `.claude/plan/shokz-downloader.md` and `docs/sprints/`):
+Checks: `ffmpeg` / `ffprobe` on PATH, `yt-dlp` version, `output_dir`
+not symlinked + writable, sufficient disk free vs the `[disk]
+safety_multiplier`. WARN entries are informational (don't trip exit 1);
+only FAIL does.
 
-```bash
-shokz doctor                                         # Sprint 9
+Sample output:
+
+```
+shokz doctor:
+  PASS  ffmpeg                 found at /opt/homebrew/bin/ffmpeg
+  PASS  ffprobe                found at /opt/homebrew/bin/ffprobe
+  PASS  yt-dlp                 version 2026.04.30
+  PASS  output_dir             /Users/me/swim-mp3s is not symlinked
+  PASS  output_dir_writable    /Users/me/swim-mp3s is writable
+  PASS  disk_free              42 GiB free
+
+All checks passed (WARN entries informational).
 ```
 
-## Configuration
+## Crash-safe writes + manifest
 
-- Built-in defaults → `~/.config/shokz/config.toml` → `./shokz.toml` → `SHOKZ_*` env → CLI flags
-- See `shokz.toml.example` for every available knob.
-- `shokz config show` prints the effective config and which file each value came from.
+Every successful download is recorded in `downloads/.shokz/manifest.jsonl`
+(append-only JSONL, schema_version=1) with file + parent-dir fsync.
+Killed processes leave NO partial `*.mp3` in `downloads/` — only
+`.tmp/*.partial` which is auto-cleaned on the next run. Integrity
+checks reject:
+- yt-dlp 0-byte / truncated raw downloads (post-download size check)
+- ffmpeg silent truncation (post-encode duration probe within 2%)
 
-Output goes to `./downloads/`:
+Failures are recorded in `downloads/.shokz/failures.jsonl` with stable
+`error_class` strings for downstream tooling (and as input for
+`shokz retry`).
+
+Layout:
 
 ```
 downloads/
-├── <Video Title>.mp3   # final files (title-based)
-├── .tmp/               # in-progress (auto-cleaned)
-└── .shokz/             # state (manifest, failures, runs, locks)
+├── <Video Title>.mp3                       # final files (title-based filenames)
+├── .tmp/                                   # in-progress (auto-cleaned)
+└── .shokz/
+    ├── manifest.jsonl                      # successful tracks, fsync'd per row
+    ├── failures.jsonl                      # per-track failures (input to `shokz retry`)
+    └── locks/
+        └── shokz.lock + shokz.lock.meta    # cross-process lock + holder metadata
 ```
 
-## Development workflow
+## Architecture
 
-This project follows **Agile-for-solo** with a strict Definition of Done:
+Hexagonal (Ports & Adapters):
+
+- `src/shokz/domain/` — pure data + errors, zero framework imports
+- `src/shokz/application/` — use cases + ports + policies (lock, retry, disk-guard, skip-existing, reconciliation, file-name resolution)
+- `src/shokz/adapters/inbound/cli/` — Typer-based CLI surface (one file per command)
+- `src/shokz/adapters/outbound/` — `yt-dlp` source, `ffmpeg` encoder, JSONL manifest, local filesystem, null progress reporter
+- `src/shokz/composition.py` — single composition root that wires every port to its concrete adapter
+
+The dependency direction is always inward: adapters → application → domain.
+The domain layer has zero `import yt_dlp / ffmpeg / typer / asyncio`.
+
+## Development
 
 ```bash
-just lint        # ruff
-just typecheck   # mypy --strict
-just test        # pytest with coverage ≥80%
-just ci          # all of the above (what GitHub Actions runs)
+ruff check src tests        # lint
+mypy src                    # type-check (strict)
+pytest                      # unit + acceptance tests
+INTEGRATION=1 pytest        # also run network-dependent INTEGRATION tests (~6 min)
 ```
 
-See `.claude/plan/shokz-downloader.md` §0.5 for full process details.
+See `RETRO.md` for sprint-by-sprint lessons learned and
+`docs/sprints/sprint-N.md` for per-sprint specs (Gherkin-style AC,
+GAN-fix manifests, definition-of-ready, definition-of-done).
 
 ## License
 
-MIT
+MIT — see `LICENSE`.
