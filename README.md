@@ -36,7 +36,7 @@ shokz download --output ~/swim-mp3s URL              # custom output dir
 If two videos resolve to the same filename, the second auto-suffixes:
 `Foo.mp3` → `Foo (2).mp3` → `Foo (3).mp3` ...
 
-**Sequential by default (v0.7.0+)**: a bare `shokz download URL_A URL_B URL_C` processes URLs strictly in order. Pass `-c 4` (cap is 4) to enable in-process concurrency. **Do NOT** spawn multiple `shokz` processes against the same `--output` directory; the manifest layer is single-process-safe only until Sprint 8 lands cross-process file locking.
+**Sequential by default (v0.7.0+)**: a bare `shokz download URL_A URL_B URL_C` processes URLs strictly in order. Pass `-c 4` (cap is 4) to enable in-process concurrency. Multi-process invocations against the same `--output` are SAFE since v1.0.0: the cross-process file lock (`<output_dir>/.shokz/locks/shokz.lock`) detects contention and the second invocation exits cleanly with `AnotherRunInProgress` naming the holder PID + start time + lock path.
 
 **Classified retry (v0.8.0+)**: transient YouTube failures auto-retry with sensible backoff:
 

@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] -- 2026-04-30
+
+### Added -- Sprint 10: `shokz doctor` (read-only diagnostics)
+
+NEW `shokz doctor` command runs read-only diagnostics over the user's
+environment + config and reports `PASS / WARN / FAIL` per check. Exits
+0 when no FAIL was emitted (WARN doesn't trip exit 1 because disk-free
+is dynamic). Per the master plan §"v1.1.0 = doctor".
+
+Checks:
+- ffmpeg / ffprobe present on PATH (via `shutil.which`)
+- yt-dlp version captured into the PASS message (visibility for stale
+  installs)
+- `output_dir` not symlinked (reuses Sprint 9 `assert_output_dir_safe`
+  helper as a predicate so doctor catches the same condition that
+  download/playlist/retry would reject)
+- `output_dir` writable (transient mkdir + tempfile + auto-delete)
+- Disk free vs `safety_multiplier * 1 GiB` floor → WARN (not FAIL,
+  since transient low-disk shouldn't block other commands)
+
+Hexagonal: `RunDoctorUseCase` accepts `which` / `disk_free_bytes` /
+`ytdlp_version` as injectable Callables, so unit tests drive every
+branch deterministically without real subprocess or filesystem state.
+
+- NEW `src/shokz/application/use_cases/doctor.py`: `RunDoctorUseCase`
+  + `CheckResult` / `DoctorResult` dataclasses
+- NEW `src/shokz/adapters/inbound/cli/commands/doctor.py`: thin CLI
+  wrapper rendering the table + exit-code logic
+- `app.py` registers `doctor` as the 6th top-level command
+- 9 NEW tests in `tests/unit/application/test_doctor.py` (7 unit + 2
+  CLI integration); strict TDD: RED phase 1 (ImportError on the use
+  case + dataclasses), GREEN 1 (use case + 7 unit tests pass), RED
+  phase 2 (Typer exit 2 because `doctor` not registered), GREEN 2
+  (CLI + app.py wiring → 9 GREEN, 282 total)
+
+### Fixed (cross-cutting)
+
+- README.md: stale claim "single-process-safe only until Sprint 8" →
+  updated to reflect the cross-process file lock shipped in v1.0.0.
+  (Drift detected during Sprint 10 pre-flight.)
+
 ## [1.0.2] -- 2026-04-30
 
 ### Fixed -- Sprint 9: consistent symlink rejection across download/playlist/retry (M1 carry-forward from Sprint 8.5)
