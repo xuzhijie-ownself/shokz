@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] -- 2026-04-30
+
+### Fixed -- Sprint 9: consistent symlink rejection across download/playlist/retry (M1 carry-forward from Sprint 8.5)
+
+Before this fix, only `BatchDownloadUseCase` rejected symlinked
+`output_dir` -- so `shokz retry` could either silently exit 0 (when
+the symlink target lacked `failures.jsonl`) or waste a lock acquire +
+iter_failures read on a symlinked path. `shokz playlist` would burn a
+yt-dlp metadata round-trip before failing. Lifted the rejection into
+a shared CLI-runtime helper so all three commands fail fast with the
+same actionable message BEFORE any network call or lock acquire.
+
+- NEW `assert_output_dir_safe(config)` in
+  `src/shokz/adapters/inbound/cli/_runtime.py`: walks `output_dir`
+  outward, raising `NameOutsideOutputDir` if the path itself OR any
+  ancestor is a symlink. Defense in depth -- a symlink anywhere in the
+  path can defeat `Path.resolve()`-based protection.
+- Wired into `download.py`, `playlist.py`, `retry.py` immediately
+  after config load, BEFORE any network call / lock acquire / stat
+  short-circuit.
+- 7 NEW tests in `tests/unit/test_cli_runtime.py`: 4 unit tests
+  (real dir / nonexistent / symlinked leaf / symlinked ancestor) +
+  3 CLI integration tests (Typer CliRunner verifies each command
+  exits 1 with "symlink" in the error AND no `.shokz/locks/` dir was
+  created at the symlink target -- proves the check fires BEFORE the
+  lock acquire).
+- Strict TDD: tests written first, ImportError-failed against an
+  empty `_runtime.py`, then helper added (4 GREEN), then 3 wiring
+  edits (7 GREEN).
+
 ## [1.0.1] -- 2026-04-30
 
 ### Added -- Sprint 8.5: `shokz retry` (re-process `failures.jsonl`)

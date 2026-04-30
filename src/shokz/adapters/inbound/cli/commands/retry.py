@@ -35,6 +35,7 @@ from typing import Any
 import typer
 
 from shokz.adapters.inbound.cli._runtime import (
+    assert_output_dir_safe,
     build_output_lock,
     run_async_with_sigint,
 )
@@ -50,6 +51,7 @@ from shokz.domain.errors import (
     AnotherRunInProgress,
     LockOwnerUnknown,
     ManifestReadError,
+    NameOutsideOutputDir,
     ShokzError,
     StaleLock,
 )
@@ -164,6 +166,17 @@ def retry_command(
         except ValueError as e:
             typer.echo(f"error: {e}", err=True)
             sys.exit(2)
+
+    # Sprint 9: symlink-safety pre-check BEFORE the stat short-circuit
+    # below. Without this, a symlinked --output whose target lacks
+    # failures.jsonl would silently exit 0 ("no failures to retry"),
+    # masking a misconfigured output_dir from the user. M1 carry-forward
+    # from Sprint 8.5 Phase C.
+    try:
+        assert_output_dir_safe(config)
+    except NameOutsideOutputDir as e:
+        typer.echo(f"error: {e}", err=True)
+        sys.exit(1)
 
     container = build_container(config)
 

@@ -16,6 +16,7 @@ from typing import Any
 import typer
 
 from shokz.adapters.inbound.cli._runtime import (
+    assert_output_dir_safe,
     build_output_lock,
     run_async_with_sigint,
 )
@@ -144,6 +145,15 @@ def download_command(
         name_override=name_override,
         force=force,
     )
+
+    # Sprint 9: reject symlinked --output BEFORE acquiring the lock so a
+    # symlinked path can't waste a lock acquire. NameOutsideOutputDir is
+    # a ShokzError; the existing outer except chain handles it (exit 1).
+    try:
+        assert_output_dir_safe(config)
+    except NameOutsideOutputDir as e:
+        typer.echo(f"error: {e}", err=True)
+        sys.exit(1)
 
     # Sprint 8b GAN M1: cross-process advisory lock + SIGINT handler. Lock
     # acquired SYNC pre-asyncio.run (so __exit__ runs even if SIGINT closes

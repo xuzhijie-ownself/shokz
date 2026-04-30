@@ -10,6 +10,7 @@ from pathlib import Path
 import typer
 
 from shokz.adapters.inbound.cli._runtime import (
+    assert_output_dir_safe,
     build_output_lock,
     run_async_with_sigint,
 )
@@ -96,6 +97,15 @@ def playlist_command(
     set_run_id(run_id)
     log = logging.getLogger("shokz.cli")
     log.info("playlist run_id=%s url=%s", run_id, url)
+
+    # Sprint 9: symlink-safety pre-check BEFORE any network call (the
+    # `expand_playlist` step below would otherwise burn a yt-dlp metadata
+    # request just to fail at the lock acquire later).
+    try:
+        assert_output_dir_safe(config)
+    except NameOutsideOutputDir as e:
+        typer.echo(f"error: {e}", err=True)
+        sys.exit(1)
 
     container = build_container(config)
 
