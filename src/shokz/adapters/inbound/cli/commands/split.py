@@ -15,7 +15,6 @@ rationale.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -23,6 +22,7 @@ from typing import Any
 
 import typer
 
+from shokz.adapters.inbound.cli._runtime import run_async_with_sigint
 from shokz.application.use_cases.split_audio import (
     SplitAudioInput,
     SplitAudioResult,
@@ -93,7 +93,16 @@ def split_command(
     )
 
     try:
-        result = asyncio.run(container.split_audio.execute(inp))
+        # Sprint 12: same SIGINT scaffolding as download/playlist/retry. The
+        # adapter stages through a scratch dir, so an interrupt during
+        # SEGMENTING leaves no partial parts behind. Caveat, stated honestly:
+        # under --force the previous split has already been deleted by then,
+        # and Ctrl+C will not bring it back. Parts are derived artifacts --
+        # `-c copy`, ~4s to regenerate -- and the source is never touched.
+        result = run_async_with_sigint(container.split_audio.execute(inp))
+    except KeyboardInterrupt:
+        typer.echo("interrupted", err=True)
+        sys.exit(130)
     except SplitFailed as e:
         typer.echo(f"error: {e}", err=True)
         sys.exit(1)
@@ -109,6 +118,13 @@ def split_command(
 
 
 def _print_split_summary(result: SplitAudioResult) -> None:
+    if result.deleted_stale:
+        # Never let the part count silently drop. If --force removed a previous
+        # split, say so -- Sprint 11 left those files on disk AND reported them
+        # as freshly written, which is how a user ended up with corrupt audio.
+        typer.echo(
+            f"\n--force: removed {result.deleted_stale} part(s) from a previous split."
+        )
     minutes = result.segment_seconds // 60
     typer.echo(
         f"\nsplit {result.source.name} into {len(result.parts)} part(s) "

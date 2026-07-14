@@ -20,6 +20,7 @@ from shokz.domain.models import (
     Track,
     TrackStatus,
 )
+from shokz.domain.split_parts import pad_width, part_name
 
 
 def _id_from(url: str) -> str:
@@ -94,8 +95,8 @@ class FakeAudioEncoder:
     encode_calls: list[tuple[Path, Path, AudioSpec]] = field(default_factory=list)
     # Sprint 4: control what probe_duration returns (defaults: match track perfectly).
     probe_duration_value: float = 120.0
-    # Sprint 11: AudioEncoderPort.segment call log.
-    segment_calls: list[tuple[Path, Path, int]] = field(default_factory=list)
+    # AudioEncoderPort.segment call log: (src, dest_dir, stem, suffix, seconds).
+    segment_calls: list[tuple[Path, Path, str, str, int]] = field(default_factory=list)
 
     async def encode(self, src: Path, dest: Path, spec: AudioSpec) -> EncodedFile:
         self.encode_calls.append((src, dest, spec))
@@ -115,16 +116,29 @@ class FakeAudioEncoder:
         return self.probe_duration_value
 
     async def segment(
-        self, src: Path, dest_template: Path, segment_seconds: int
+        self,
+        src: Path,
+        dest_dir: Path,
+        stem: str,
+        suffix: str,
+        segment_seconds: int,
     ) -> tuple[Path, ...]:
-        """Sprint 11: AudioEncoderPort gained `segment`. This shared fake
-        mirrors it so every call site that passes `FakeAudioEncoder()`
-        where an `AudioEncoderPort` is expected still satisfies the
-        Protocol structurally. `BatchDownloadUseCase` never calls it;
-        `SplitAudioUseCase` has its own richer fake."""
-        self.segment_calls.append((src, dest_template, segment_seconds))
-        part = Path(str(dest_template) % 1)
-        part.parent.mkdir(parents=True, exist_ok=True)
+        """AudioEncoderPort.segment (Sprint 11, re-signed Sprint 12).
+
+        Names parts via the DOMAIN rule and returns exactly what it wrote --
+        the same contract the real FfmpegEncoder honours. Sprint 11's fake
+        diverged from the adapter (fake returned what it wrote; adapter
+        returned what existed on disk), which is precisely why a HIGH-severity
+        corruption bug shipped with a green suite. A fake that is easier than
+        the real thing is not a test, it is a mirror.
+
+        `BatchDownloadUseCase` never calls this; it exists so every call site
+        passing `FakeAudioEncoder()` still satisfies the Protocol.
+        `SplitAudioUseCase` has its own richer fake.
+        """
+        self.segment_calls.append((src, dest_dir, stem, suffix, segment_seconds))
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        part = dest_dir / part_name(stem, 1, suffix, pad_width(1))
         part.write_bytes(b"\xff\xfb\x90\x00FAKEPART")
         return (part,)
 

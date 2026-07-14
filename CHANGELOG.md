@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] -- 2026-07-14
+
+### Fixed -- Sprint 12: `shokz split` silently corrupted audio on `--force` (HIGH)
+
+**If you used `shokz split --force` on v1.2.0, re-check your parts.** A single
+`--force` re-split left the previous split's trailing parts on disk and
+reported them as freshly written. Copying them to the device produced audio
+already covered by the new parts, at the old boundaries.
+
+Reproduced: source split into 11 parts, then re-split coarser with `--force`.
+ffmpeg wrote **4** parts. The CLI reported **"11 part(s)"** and listed all
+eleven. Seven were stale.
+
+**Root cause -- one design error, five symptoms.** The use case built an ffmpeg
+printf template (`(part %02d).mp3`) and passed it across the port boundary,
+handing naming authority to ffmpeg. The adapter then answered *"what did I
+produce?"* by scanning the output directory from 1 upward until it hit a gap.
+**A directory scan cannot distinguish a file this run wrote from one that was
+already there.** Everything below falls out of that one sentence:
+
+| | |
+|---|---|
+| **HIGH** | `--force` reported a previous split's stale parts as freshly written |
+| | A failed segment's cleanup could delete a previous *good* split |
+| | The no-clobber guard checked only `(part 01)`, so a series whose first part had been deleted was silently re-split on top of |
+| | `100% Focus.mp3` crashed with a raw `TypeError` -- `%` in a title, which `download` happily creates |
+| | Pad width was hard-coded to 2, so past 99 parts `(part 100)` sorted before `(part 99)` |
+
+**And why 14 green tests missed it:** the fake encoder returned *what it wrote*
+while the real adapter returned *what existed on disk*. The fake was strictly
+better-behaved than production, and `FfmpegEncoder.segment()` had **zero**
+direct tests. A fake that is easier than the real thing is not a test, it is a
+mirror.
+
+#### The fix -- naming authority taken back from ffmpeg
+
+- NEW `src/shokz/domain/split_parts.py` -- `part_name()` / `existing_parts()` /
+  `pad_width()`. Part naming is a *domain* rule (it exists because the Shokz
+  file browser sorts lexicographically), now spelled in exactly one place.
+  Enumeration is an explicit regex over `re.escape(stem)` -- never printf,
+  never glob, never walk-until-gap -- so it sees a series with holes in it and
+  treats `%`, `[`, `(`, `+` in titles as literal.
+- `AudioEncoderPort.segment()` signature drops the template:
+  `(src, dest_dir, stem, suffix, seconds)`. The contract now says, explicitly,
+  *return exactly the parts THIS CALL produced -- never a disk scan* and
+  *leave `dest_dir` untouched on failure, including a previous split*.
+- `FfmpegEncoder.segment()` stages through a hidden scratch dir created inside
+  `dest_dir` (same filesystem -> atomic renames), with a template whose
+  **filename component contains zero user text**, then renames staged files
+  into place under `part_name()`. "What did I produce?" becomes *knowable*
+  rather than inferred; cleanup becomes `rmtree(scratch)`, structurally
+  incapable of touching a file this call did not create; pad width follows the
+  real count. `_collect_parts` / `_cleanup_parts` deleted.
+- `--force` now deletes the whole previous series **before** segmenting -- and
+  **refuses to proceed** if it cannot fully clear it (an undeletable stale part
+  surviving beside a shorter new series is precisely the corrupt state this
+  release exists to abolish). It also pre-flights ffmpeg before that
+  destructive step, so a missing binary can no longer cost you the old parts
+  with nothing in return.
+- The no-clobber guard sees the **whole series**, not just `(part 01)`, and
+  names the count.
+- CLI: `run_async_with_sigint` + `KeyboardInterrupt` -> exit 130; reports
+  `removed N part(s) from a previous split` so the part count never silently
+  drops.
+- Also: `-vn` (drop cover art the segment muxer would replicate into every
+  part); a missing ffmpeg now says *"run `shokz doctor`"* instead of raising
+  `FileNotFoundError`.
+
+#### Tests: 33 new (296 -> 329)
+
+- NEW `tests/unit/adapters/test_ffmpeg_encoder_segment.py` (9) -- **against real
+  ffmpeg**. The file that should have existed in Sprint 11. Two of its cases
+  reproduce the exact shipped bugs.
+- NEW `tests/unit/domain/test_split_parts.py` (15).
+- `tests/unit/application/test_split_audio.py` rewritten (23) -- the fake is now
+  bound to the same `part_name()` the adapter uses, so it can no longer be more
+  forgiving than production.
+
+Reviewed adversarially before tagging: 26 claims raised, 8 refuted, and the
+surviving ones triaged against the *shipped* baseline rather than an imagined
+safe one. Two were taken on the spot (the unlink-swallow and the ffmpeg
+pre-flight); the rest are v1.2.2 follow-ups, listed in `RETRO.md`.
+
+### Known, unfixed (v1.2.2)
+
+- A `%` in the output **directory** name (not the title) still reaches ffmpeg's
+  printf expander. Pre-existing; v1.2.0 crashed outright on it. Fix is
+  `cwd=scratch` + a relative template.
+
 ## [1.2.0] -- 2026-04-30
 
 ### Added -- Sprint 11: `shokz split` (hour-sized MP3 parts)

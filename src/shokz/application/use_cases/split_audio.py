@@ -1,42 +1,56 @@
-"""SplitAudioUseCase -- Sprint 11: chop a long MP3 into hour-sized parts.
+"""SplitAudioUseCase -- chop a long MP3 into hour-sized parts (Sprint 11, fixed Sprint 12).
 
-Why this exists: an 11-hour audiobook downloads as a single 326 MB MP3.
-Shokz bone-conduction headphones have no usable seek-within-track UI
-underwater -- you get next/previous track and that's about it. Splitting
-into hour-sized parts turns "scrub blindly through 11 hours" into "press
-next twice".
+Why this exists: an 11-hour audiobook downloads as a single 312 MB MP3. Shokz
+bone-conduction headphones have no usable seek-within-track UI underwater --
+you get next/previous track and little else. Splitting into hour-sized parts
+turns "scrub blindly through 11 hours" into "press next twice".
 
-Three deliberate design constraints:
+WHAT SPRINT 12 CHANGED
+----------------------
+Sprint 11 built an ffmpeg printf template here (`f"{stem} (part %02d){suffix}"`)
+and passed it across the port boundary, handing naming authority to ffmpeg. The
+adapter then answered "what did I produce?" by scanning the output directory
+until it hit a gap. That single design error produced four defects, one of them
+HIGH severity:
 
-  1. LOSSLESS. The adapter stream-copies (`ffmpeg -c copy`), never
-     re-encodes. No generational quality loss, and a 326 MB source
-     segments in seconds rather than the ~5 minutes a re-encode costs.
+  * `--force` re-split reported a PREVIOUS split's stale parts as freshly
+    written -- the user copied audio at the wrong boundaries to the device.
+  * A failed segment's cleanup could delete a previous GOOD split.
+  * The no-clobber guard checked only `(part 01)`, so a series whose first part
+    had been deleted was silently re-split on top of.
+  * `str(template) % n` crashed on any title containing `%`.
 
-  2. NO MANIFEST COUPLING. Split reads and writes NOTHING under
-     `.shokz/`. It operates on any MP3 already on disk. This keeps
-     skip-existing, retry, and reconciliation completely untouched --
-     and sidesteps the schema migration that a 1-URL-to-N-rows manifest
-     would otherwise force.
+Now: `domain/split_parts.py` owns naming and enumeration, the port takes a plain
+`stem`/`suffix` (never a format string), and `--force` deletes the whole old
+series BEFORE segmenting so what remains is exactly the new split.
 
-  3. NO LOCK. Split emits part-suffixed names (`Title (part 01).mp3`)
-     that `download` would never produce, and writes no manifest row, so
-     it cannot race a concurrent download. Skipping the cross-process
-     lock is safe here, unlike in download / playlist / retry.
+Three constraints that have NOT changed:
 
-Consequence of (2): `shokz library verify` will report the part files as
-orphans (on disk, no manifest entry). That is honest and correct -- they
-ARE unmanaged files. Split is a post-processing tool, not a download
-mode.
+  1. LOSSLESS. The adapter stream-copies (`ffmpeg -c copy`), never re-encodes.
+     A 312 MB / 11.35-hour source splits in ~4 seconds with zero quality loss.
+
+  2. NO MANIFEST COUPLING. Split reads and writes NOTHING under `.shokz/`. It
+     operates on any MP3 already on disk, so skip-existing, retry and
+     reconciliation are untouched -- and the 1-URL-to-N-rows manifest schema
+     migration is sidestepped entirely. Honest consequence: `shokz library
+     verify` reports part files as orphans, because they ARE unmanaged files.
+     Split is a post-processing tool, not a download mode.
+
+  3. NO LOCK. Split emits part-suffixed names that `download` would never
+     produce and writes no manifest row, so it cannot race a concurrent
+     download.
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from shokz.application.ports.outbound.encoder import AudioEncoderPort
 from shokz.domain.errors import ShokzError, SplitFailed
+from shokz.domain.split_parts import existing_parts
 
 _log = logging.getLogger("shokz.usecase.split_audio")
 
@@ -49,7 +63,7 @@ class SplitAudioInput:
     hours: float = 1.0
     # Where the parts land. None -> alongside the source.
     output_dir: Path | None = None
-    # Opt-in to overwriting a previous split's parts.
+    # Opt-in to replacing a previous split of this same file.
     force: bool = False
 
 
@@ -58,66 +72,115 @@ class SplitAudioResult:
     source: Path
     parts: tuple[Path, ...]
     segment_seconds: int
+    # How many parts from a PREVIOUS split --force removed. Surfaced so the CLI
+    # can tell the user their old series is gone, rather than leaving them to
+    # wonder why the part count dropped.
+    deleted_stale: int = 0
 
 
 class SplitAudioUseCase:
-    """Validate, then delegate the actual segmenting to the encoder port."""
+    """Validate, clear the way, then delegate the segmenting to the encoder port."""
 
     def __init__(self, encoder: AudioEncoderPort) -> None:
         self._encoder = encoder
 
     async def execute(self, inp: SplitAudioInput) -> SplitAudioResult:
-        # 1. Validate the source BEFORE shelling out, so the user gets a
-        #    clean message instead of an ffmpeg stderr dump.
+        # 1. Validate the source BEFORE shelling out, so the user gets a clean
+        #    message instead of an ffmpeg stderr dump.
         if not inp.source.is_file():
             raise SplitFailed(
                 f"source file not found: {inp.source}. "
                 "Pass the path to an existing audio file."
             )
 
-        # 2. `--hours 0` would make ffmpeg emit zero-length segments
-        #    forever. Reject it up front.
+        # 2. `--hours 0` would make ffmpeg emit zero-length segments forever.
         if inp.hours <= 0:
-            raise SplitFailed(
-                f"--hours must be greater than 0, got {inp.hours}"
-            )
+            raise SplitFailed(f"--hours must be greater than 0, got {inp.hours}")
         segment_seconds = int(inp.hours * _SECONDS_PER_HOUR)
         if segment_seconds < 1:
             raise SplitFailed(
                 f"--hours {inp.hours} rounds to a {segment_seconds}s segment; "
-                "use a larger value (minimum is roughly 0.0003 hours = 1s)"
+                "use a larger value"
             )
 
         output_dir = inp.output_dir or inp.source.parent
-        output_dir.mkdir(parents=True, exist_ok=True)
+        stem, suffix = inp.source.stem, inp.source.suffix
 
-        # 3. Build the ffmpeg segment-muxer template. `%02d` is consumed
-        #    by ffmpeg, not by us -- hence a printf placeholder embedded
-        #    in a Path. Zero-padded + 1-indexed so the parts sort
-        #    correctly in the device's file browser.
-        dest_template = output_dir / f"{inp.source.stem} (part %02d){inp.source.suffix}"
+        # 3. Deal with a previous split of THIS file. `existing_parts` enumerates
+        #    the real directory contents by regex, so it sees the whole series --
+        #    including one with holes in it, which the Sprint 11 "does (part 01)
+        #    exist?" check was blind to. It never matches another file's parts.
+        stale = existing_parts(output_dir, stem, suffix)
+        deleted_stale = 0
+        if stale:
+            if not inp.force:
+                raise SplitFailed(
+                    f"{len(stale)} existing part(s) for {inp.source.name} in "
+                    f"{output_dir} (e.g. {stale[0].name}); "
+                    "pass --force to replace that split"
+                )
 
-        # 4. No silent clobber. If a previous split's first part is
-        #    sitting there, stop and name it -- unless --force.
-        first_part = Path(str(dest_template) % 1)
-        if first_part.exists() and not inp.force:
-            raise SplitFailed(
-                f"{first_part.name} already exists in {output_dir}; "
-                "pass --force to overwrite a previous split"
+            # Pre-flight ffmpeg BEFORE the destructive delete. Without this,
+            # a user whose ffmpeg went missing loses their old parts and gets
+            # nothing back -- the one way this release is worse than v1.2.0,
+            # where the missing-binary error fired before any cleanup ran.
+            if shutil.which("ffmpeg") is None:
+                raise SplitFailed(
+                    "ffmpeg not found on PATH -- run `shokz doctor`. "
+                    "Refusing to delete the previous split when I cannot "
+                    "produce a new one."
+                )
+
+            # Delete the OLD series *before* segmenting, so what remains
+            # afterwards is exactly the new split. (Deliberately NOT
+            # segment-then-prune: staging a second full copy alongside the
+            # old one triples peak disk, which makes the DiskFull branch --
+            # the very thing that motivates the alternative -- more likely.
+            # Deleting first FREES a source-file's worth of space.)
+            failed: list[tuple[Path, OSError]] = []
+            for part in stale:
+                try:
+                    part.unlink(missing_ok=True)
+                    deleted_stale += 1
+                except OSError as e:
+                    failed.append((part, e))
+
+            # NEVER split on top of a survivor. A stale part that outlives the
+            # delete would sit beside a shorter new series -- which IS the
+            # corrupt on-disk state this whole sprint exists to abolish. The
+            # invariant the fix rests on gets CHECKED, not assumed.
+            if failed:
+                path, err = failed[0]
+                raise SplitFailed(
+                    f"--force could not remove {len(failed)} part(s) of the "
+                    f"previous split (e.g. {path.name}: {err}); refusing to "
+                    "split on top of a series I cannot fully clear"
+                )
+            survivors = existing_parts(output_dir, stem, suffix)
+            if survivors:
+                raise SplitFailed(
+                    f"{len(survivors)} part(s) of the previous split survived "
+                    f"--force (e.g. {survivors[0].name}); refusing to split on "
+                    "top of them"
+                )
+
+            _log.info(
+                "--force: removed %d part(s) from a previous split of %s",
+                deleted_stale, inp.source.name,
             )
 
-        # 5. Delegate. The adapter owns the ffmpeg invocation + its error
-        #    translation; we re-wrap any ShokzError as SplitFailed so the
-        #    caller has exactly one class to catch.
+        # 4. Delegate. The adapter owns the ffmpeg invocation and its error
+        #    translation; it is contractually required to return exactly the
+        #    parts IT wrote, and to leave output_dir untouched if it fails.
         try:
             parts = await self._encoder.segment(
-                inp.source, dest_template, segment_seconds
+                inp.source, output_dir, stem, suffix, segment_seconds
             )
         except ShokzError as e:
             raise SplitFailed(f"ffmpeg could not split {inp.source.name}: {e}") from e
 
-        # 6. ffmpeg exiting 0 while emitting nothing is a silent failure
-        #    we refuse to pass off as success.
+        # 5. ffmpeg exiting 0 while producing nothing is a silent failure we
+        #    refuse to pass off as success.
         if not parts:
             raise SplitFailed(
                 f"ffmpeg reported success but produced no parts for {inp.source.name}"
@@ -131,4 +194,5 @@ class SplitAudioUseCase:
             source=inp.source,
             parts=tuple(parts),
             segment_seconds=segment_seconds,
+            deleted_stale=deleted_stale,
         )

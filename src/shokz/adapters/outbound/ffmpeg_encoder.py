@@ -2,6 +2,9 @@
 
 Sprint 1: uses libmp3lame, mono downmix when spec.channels == 1, fixed sample
 rate, CBR. Post-encode probe_duration uses ffprobe JSON output (plan §9 risk 4).
+
+Sprint 12: `segment()` stages ffmpeg's output through a private scratch dir so
+"what did I produce?" is known rather than inferred. See its docstring.
 """
 
 from __future__ import annotations
@@ -10,12 +13,38 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import re
+import shutil
+import tempfile
 from pathlib import Path
+from typing import Final
 
 from shokz.domain.errors import DiskFull, EncodingFailed
 from shokz.domain.models import AudioSpec, EncodedFile
+from shokz.domain.split_parts import pad_width, part_name
 
 _log = logging.getLogger("shokz.adapter.ffmpeg")
+
+# Matches the scratch-dir names WE tell ffmpeg to write (`part-00001.mp3`).
+# Fully under our control, so no user text can reach it.
+_SCRATCH_PART_RE: Final[re.Pattern[str]] = re.compile(r"^part-(\d+)\.")
+
+
+def _scratch_parts_in_order(scratch: Path) -> list[Path]:
+    """The parts ffmpeg wrote, in play order.
+
+    Sorted by the PARSED integer rather than lexicographically: ffmpeg's
+    `%05d` does not truncate past 99999, so `part-100000` must still sort
+    after `part-99999`.
+    """
+    numbered: list[tuple[int, Path]] = []
+    for entry in scratch.iterdir():
+        match = _SCRATCH_PART_RE.match(entry.name)
+        if match is not None and entry.is_file():
+            numbered.append((int(match.group(1)), entry))
+    numbered.sort(key=lambda pair: pair[0])
+    return [path for _, path in numbered]
 
 
 class FfmpegEncoder:
@@ -87,84 +116,140 @@ class FfmpegEncoder:
         )
 
     async def segment(
-        self, src: Path, dest_template: Path, segment_seconds: int
+        self, src: Path, dest_dir: Path, stem: str, suffix: str, segment_seconds: int
     ) -> tuple[Path, ...]:
-        """Sprint 11: lossless split via ffmpeg's segment muxer.
+        """Sprint 12: lossless split, staged through a private temp dir.
 
         `-c copy` stream-copies the audio -- no decode, no re-encode, no
         generational quality loss. A 326 MB / 11-hour source segments in
-        seconds; a re-encode of the same file takes ~5 minutes.
+        ~4 seconds; a re-encode of the same file takes ~5 minutes.
 
-        `-reset_timestamps 1` makes each part start at t=0 so players
-        (and the Shokz device) show a sane per-part progress bar instead
-        of an offset into the original.
+        WHY THE TEMP DIR (this is the Sprint 12 fix)
+        --------------------------------------------
+        Sprint 11 pointed ffmpeg's segment muxer straight at the output
+        directory using a printf template built from the user's title, then
+        answered "what did I just produce?" by scanning that directory from
+        1 upward until it hit a gap. A directory scan cannot tell a file
+        THIS RUN WROTE from one that was ALREADY THERE, which silently
+        reported a previous split's stale parts as freshly written (HIGH:
+        corrupt audio on-device), let a failed run's cleanup delete a
+        previous GOOD split, and crashed outright on any title containing
+        a `%`.
 
-        `-segment_start_number 1` numbers parts from 01, matching the
-        port contract, so `(part 01)` sorts before `(part 02)` on-device.
+        So ffmpeg now writes into a hidden scratch dir created INSIDE
+        `dest_dir` (same filesystem => the renames below are atomic), using
+        a template containing ZERO user text. Consequences, all of which
+        are the point:
+
+          * "what did I produce?" is exactly the scratch dir's contents --
+            known, not inferred. Nothing else can be in there.
+          * cleanup is `rmtree(scratch)`, which is structurally incapable
+            of touching a file this call did not create.
+          * the pad width is computed from the REAL part count, so >99
+            parts still sort into play order.
+          * an interrupt or a crash leaves the output dir as THIS METHOD
+            found it -- nothing is moved into place until ffmpeg succeeds.
+            NOTE the precise scope: the use case may already have deleted a
+            previous split under `--force` before calling us. That deletion
+            is not ours to undo, and it is guarded there (ffmpeg is
+            pre-flighted, and an unclearable series aborts before we run).
+
+        LIMITATION, stated plainly rather than papered over: the template
+        below is an absolute path, so `dest_dir` and `suffix` DO reach
+        ffmpeg's printf expander even though `stem` does not. A '%' in the
+        output DIRECTORY name is therefore still mishandled -- a real but
+        pre-existing defect (v1.2.0 crashed outright on it). Fixing it means
+        running with `cwd=scratch` and a relative template. Do not let this
+        docstring drift into claiming the template is user-text-free: a
+        lying safety comment is how the next person reintroduces the
+        corruption this rewrite abolished.
+
+        `-reset_timestamps 1` makes each part start at t=0 so the device
+        shows a sane per-part position rather than an offset into the
+        original. `-vn` drops any embedded cover art, which the segment
+        muxer would otherwise try to replicate into every part.
         """
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(src),
-            "-c",
-            "copy",
-            "-f",
-            "segment",
-            "-segment_time",
-            str(segment_seconds),
-            "-reset_timestamps",
-            "1",
-            "-segment_start_number",
-            "1",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            str(dest_template),
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr_b = await proc.communicate()
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        # Inside dest_dir => same filesystem => os.replace below is atomic.
+        scratch = Path(tempfile.mkdtemp(dir=dest_dir, prefix=".shokz-split-"))
+        try:
+            # The FILENAME part of the template holds no user text, so a '%'
+            # in the TITLE cannot reach ffmpeg's (or Python's) format
+            # machinery -- that was the Sprint 11 crash. `dest_dir` and
+            # `suffix` are still user-derived and still in the path; see the
+            # LIMITATION note above. Do not overstate this.
+            scratch_template = scratch / f"part-%05d{suffix}"
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(src),
+                "-vn",
+                "-c",
+                "copy",
+                "-f",
+                "segment",
+                "-segment_time",
+                str(segment_seconds),
+                "-reset_timestamps",
+                "1",
+                "-segment_start_number",
+                "1",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                str(scratch_template),
+            ]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError as e:
+                raise EncodingFailed(
+                    "ffmpeg not found on PATH -- run `shokz doctor`"
+                ) from e
 
-        if proc.returncode != 0:
-            stderr = stderr_b.decode(errors="replace").strip()
-            tail = stderr.splitlines()[-1:] or ["ffmpeg segment failed"]
-            _log.warning("ffmpeg segment exit %s for %s: %s", proc.returncode, src, tail[0])
-            # A failed split must not leave a half-set of parts behind:
-            # the use case's no-clobber guard would then refuse the retry
-            # with a confusing "already exists".
-            self._cleanup_parts(dest_template)
-            stderr_lower = stderr.lower()
-            if "no space left" in stderr_lower or "enospc" in stderr_lower:
-                raise DiskFull(f"disk full while splitting {src}")
-            raise EncodingFailed(tail[0])
+            try:
+                _, stderr_b = await proc.communicate()
+            except asyncio.CancelledError:
+                # Ctrl+C: don't orphan ffmpeg writing into a dir we are
+                # about to delete. The `finally` below still clears scratch,
+                # and nothing was moved into dest_dir, so the output dir is
+                # left exactly as we found it.
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(BaseException):
+                    await proc.wait()
+                raise
 
-        parts = self._collect_parts(dest_template)
-        _log.debug("segmented %s into %d part(s)", src, len(parts))
-        return parts
+            if proc.returncode != 0:
+                stderr = stderr_b.decode(errors="replace").strip()
+                tail = stderr.splitlines()[-1:] or ["ffmpeg segment failed"]
+                _log.warning(
+                    "ffmpeg segment exit %s for %s: %s", proc.returncode, src, tail[0]
+                )
+                if "no space left" in stderr.lower() or "enospc" in stderr.lower():
+                    raise DiskFull(f"disk full while splitting {src}")
+                raise EncodingFailed(tail[0])
 
-    @staticmethod
-    def _collect_parts(dest_template: Path) -> tuple[Path, ...]:
-        """Walk 1..N until the first gap. Deterministic because
-        `-segment_start_number 1` guarantees contiguous numbering -- no
-        globbing, so no glob-metacharacter escaping needed for titles
-        containing `[`, `*`, or `?`."""
-        produced: list[Path] = []
-        n = 1
-        while True:
-            part = Path(str(dest_template) % n)
-            if not part.exists():
-                return tuple(produced)
-            produced.append(part)
-            n += 1
+            # Exactly what ffmpeg wrote -- the scratch dir holds nothing else.
+            produced = _scratch_parts_in_order(scratch)
+            if not produced:
+                return ()
 
-    def _cleanup_parts(self, dest_template: Path) -> None:
-        for part in self._collect_parts(dest_template):
-            with contextlib.suppress(OSError):
-                part.unlink()
+            width = pad_width(len(produced))
+            parts: list[Path] = []
+            for index, staged in enumerate(produced, start=1):
+                final = dest_dir / part_name(stem, index, suffix, width)
+                os.replace(staged, final)  # atomic: same filesystem
+                parts.append(final)
+
+            _log.debug("segmented %s into %d part(s)", src, len(parts))
+            return tuple(parts)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
 
     async def probe_duration(self, path: Path) -> float:
         cmd = [

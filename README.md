@@ -2,10 +2,14 @@
 
 YouTube → MP3 downloader for Shokz swimming headphones.
 
-> **Status:** `v1.2.0` — shipped. Seven commands across the full
-> download / retry / split / inspect / diagnose lifecycle. 296 unit + 27
+> **Status:** `v1.2.1` — shipped. Seven commands across the full
+> download / retry / split / inspect / diagnose lifecycle. 329 unit + 27
 > INTEGRATION tests, ruff + mypy clean. See `CHANGELOG.md` for the
 > per-version history and `RETRO.md` for sprint-by-sprint lessons.
+>
+> ⚠️ **If you used `shokz split --force` on v1.2.0, re-check your parts** —
+> it could leave stale parts from a previous split on disk and report them
+> as freshly written. Fixed in v1.2.1; see the CHANGELOG.
 
 ## Why
 
