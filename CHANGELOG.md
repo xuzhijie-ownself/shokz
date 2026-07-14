@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] -- 2026-04-30
+
+### Added -- Sprint 11: `shokz split` (hour-sized MP3 parts)
+
+Driven by real use: an 11.4-hour audiobook downloads as a single 312 MB
+MP3. Shokz bone-conduction headphones have no usable seek-within-track
+UI underwater -- you get next/previous track and little else. Splitting
+into hour-sized parts turns "scrub blindly through 11 hours" into "press
+next twice".
+
+```bash
+shokz split "downloads/Long Book.mp3" --hours 1
+shokz split "Long Book.mp3" --hours 0.5 --output ./parts   # half-hourly, separate dir
+shokz split "Long Book.mp3" --force                        # re-split, overwriting
+```
+
+Produces `Long Book (part 01).mp3` ... `(part 12).mp3` -- 1-indexed and
+zero-padded so they sort correctly in the device's file browser.
+
+**Lossless.** The adapter stream-copies (`ffmpeg -c copy`), never
+re-encodes. Measured on the real 312 MB / 11.35-hour source: **4.25
+seconds**, output totalling exactly 11.35 hours at the original 64 kbps.
+A re-encode of the same file takes ~5 minutes and loses a generation of
+quality.
+
+Three deliberate design constraints:
+
+- **No manifest coupling.** Split reads and writes nothing under
+  `.shokz/`. It operates on any MP3 already on disk, so skip-existing,
+  retry, and reconciliation are completely untouched -- and the
+  1-URL-to-N-rows manifest schema migration is sidestepped entirely.
+  Consequence, stated honestly: `shokz library verify` reports part
+  files as orphans, because they *are* unmanaged files. Split is a
+  post-processing tool, not a download mode.
+- **No cross-process lock.** Split emits part-suffixed names that
+  `download` would never produce and writes no manifest row, so it
+  cannot race a concurrent download. (Unlike download / playlist /
+  retry, which all take the lock.)
+- **No silent clobber.** Refuses to overwrite a previous split's parts
+  unless `--force`, naming the offending file.
+
+- NEW `SplitFailed` domain error (missing source, non-positive
+  `--hours`, ffmpeg failure, would-be clobber, ffmpeg-exits-0-with-no-parts)
+- NEW `AudioEncoderPort.segment(src, dest_template, segment_seconds)`;
+  implemented by the existing `FfmpegEncoder`, reusing its subprocess
+  plumbing and ENOSPC translation rather than standing up a second
+  ffmpeg adapter. A failed segment cleans up its partial parts so the
+  no-clobber guard doesn't then block the retry.
+- NEW `src/shokz/application/use_cases/split_audio.py`
+- NEW `src/shokz/adapters/inbound/cli/commands/split.py`
+- `composition.py` wires `split_audio`; `app.py` registers `split` as
+  the 7th top-level command
+- 14 NEW tests in `tests/unit/application/test_split_audio.py` (10
+  use-case + 4 CLI). Strict TDD: RED 1 (ModuleNotFoundError), GREEN 1
+  (10 pass), RED 2 (3 CLI failures), GREEN 2 (14 pass, 296 total)
+
 ## [1.1.0] -- 2026-04-30
 
 ### Added -- Sprint 10: `shokz doctor` (read-only diagnostics)

@@ -2,8 +2,8 @@
 
 YouTube → MP3 downloader for Shokz swimming headphones.
 
-> **Status:** `v1.1.0` — shipped. Six commands across the full
-> download / retry / inspect / diagnose lifecycle. 282 unit + 27
+> **Status:** `v1.2.0` — shipped. Seven commands across the full
+> download / retry / split / inspect / diagnose lifecycle. 296 unit + 27
 > INTEGRATION tests, ruff + mypy clean. See `CHANGELOG.md` for the
 > per-version history and `RETRO.md` for sprint-by-sprint lessons.
 
@@ -38,7 +38,7 @@ pytest                      # 282 tests, no skips when INTEGRATION=1
 
 ## Use
 
-Six commands. Run `shokz <cmd> --help` for full flag listings.
+Seven commands. Run `shokz <cmd> --help` for full flag listings.
 
 ### download — single URL or batch
 
@@ -118,6 +118,37 @@ tool — for that, use `shokz download <url> --force`.
 When `--since` is omitted and the candidate set spans > 7 days OR > 50
 rows, a WARNING names the count + oldest date so first-run scope blast
 is visible.
+
+### split — chop a long file into hour-sized parts (v1.2.0+)
+
+An 11-hour audiobook downloads as one 312 MB MP3. Underwater you get
+next/previous track and little else — no useful way to seek within a
+track. Splitting turns that into 12 files you can skip between.
+
+```bash
+shokz split "downloads/Long Book.mp3"                    # hourly parts, alongside the source
+shokz split "Long Book.mp3" --hours 0.5                  # half-hourly
+shokz split "Long Book.mp3" --output ./parts             # parts in their own dir
+shokz split "Long Book.mp3" --force                      # re-split, overwriting
+```
+
+Produces `Long Book (part 01).mp3` … `(part 12).mp3` — 1-indexed and
+zero-padded so they sort correctly on the device.
+
+**Lossless and fast.** Stream-copies with `ffmpeg -c copy`; no re-encode,
+no quality loss. Measured on a real 312 MB / 11.35-hour source: **4.25
+seconds**, output totalling exactly 11.35 hours at the original bitrate.
+
+Split is a *post-processing tool*, not a download mode — it reads and
+writes nothing under `.shokz/`. Two honest consequences:
+
+- `shokz library verify` will report the part files as **orphans**,
+  because they genuinely are unmanaged files. That's correct, not a bug.
+- Split takes no cross-process lock (it can't race a download: different
+  filenames, no manifest write).
+
+It refuses to overwrite a previous split's parts unless you pass
+`--force`.
 
 ### library — inspect manifest + reconcile vs disk
 

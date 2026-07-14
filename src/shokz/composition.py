@@ -27,6 +27,7 @@ from shokz.application.use_cases.library_query import (
     VerifyLibraryUseCase,
 )
 from shokz.application.use_cases.retry_failed import RetryFailedUseCase
+from shokz.application.use_cases.split_audio import SplitAudioUseCase
 from shokz.config.schema import AppConfig
 
 
@@ -40,6 +41,7 @@ class Container:
     show_library: ShowLibraryUseCase
     verify_library: VerifyLibraryUseCase
     retry_failed: RetryFailedUseCase
+    split_audio: SplitAudioUseCase
     config: AppConfig
 
 
@@ -102,6 +104,11 @@ def build_container(config: AppConfig) -> Container:
         manifest=manifest,
         batch_download=batch_download,
     )
+    # Sprint 11: `shokz split` reuses the SAME FfmpegEncoder adapter --
+    # its `segment()` shares the subprocess plumbing and ENOSPC
+    # translation with `encode()`. No manifest, no lock: split writes
+    # part-suffixed files and nothing under `.shokz/`.
+    split_audio = SplitAudioUseCase(encoder=encoder)
     return Container(
         batch_download=batch_download,
         expand_playlist=expand_playlist,
@@ -109,5 +116,6 @@ def build_container(config: AppConfig) -> Container:
         show_library=show_library,
         verify_library=verify_library,
         retry_failed=retry_failed,
+        split_audio=split_audio,
         config=config,
     )

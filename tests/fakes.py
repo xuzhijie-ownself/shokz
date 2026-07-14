@@ -94,6 +94,8 @@ class FakeAudioEncoder:
     encode_calls: list[tuple[Path, Path, AudioSpec]] = field(default_factory=list)
     # Sprint 4: control what probe_duration returns (defaults: match track perfectly).
     probe_duration_value: float = 120.0
+    # Sprint 11: AudioEncoderPort.segment call log.
+    segment_calls: list[tuple[Path, Path, int]] = field(default_factory=list)
 
     async def encode(self, src: Path, dest: Path, spec: AudioSpec) -> EncodedFile:
         self.encode_calls.append((src, dest, spec))
@@ -111,6 +113,20 @@ class FakeAudioEncoder:
 
     async def probe_duration(self, path: Path) -> float:
         return self.probe_duration_value
+
+    async def segment(
+        self, src: Path, dest_template: Path, segment_seconds: int
+    ) -> tuple[Path, ...]:
+        """Sprint 11: AudioEncoderPort gained `segment`. This shared fake
+        mirrors it so every call site that passes `FakeAudioEncoder()`
+        where an `AudioEncoderPort` is expected still satisfies the
+        Protocol structurally. `BatchDownloadUseCase` never calls it;
+        `SplitAudioUseCase` has its own richer fake."""
+        self.segment_calls.append((src, dest_template, segment_seconds))
+        part = Path(str(dest_template) % 1)
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(b"\xff\xfb\x90\x00FAKEPART")
+        return (part,)
 
 
 @dataclass

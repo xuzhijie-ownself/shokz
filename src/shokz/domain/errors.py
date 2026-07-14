@@ -84,6 +84,16 @@ class EncodingFailed(ShokzError):
     """ffmpeg returned a non-zero exit, or output was unusable."""
 
 
+# Splitting (Sprint 11)
+class SplitFailed(ShokzError):
+    """`shokz split` could not chop the source into parts.
+
+    Covers: source missing / unreadable, non-positive --hours, an ffmpeg
+    segment failure, a would-be clobber of existing part files without
+    --force, and ffmpeg exiting 0 but emitting no parts.
+    """
+
+
 # Filename / path errors (Sprint 2)
 class NameOutsideOutputDir(ShokzError):
     """A filename / --name override resolves outside the configured output_dir."""
